@@ -174,6 +174,7 @@ export async function fetchStats(): Promise<DbStats> {
 export interface DashboardData {
   termStructure: TermStructure;
   termSpreadsWithBtc: TermSpreadWithBtc[];
+  btcPrices: BtcPrice[];
   currentPendle: PendleMarketData | null;
   currentBtc: BtcCurrent | null;
   ethena: EthenaYield | null;
@@ -187,6 +188,7 @@ export async function fetchAllDashboardData(): Promise<DashboardData> {
   const [
     termStructureRes,
     termSpreadsRes,
+    btcPricesRes,
     currentPendleRes,
     currentBtcRes,
     ethenaRes,
@@ -196,6 +198,7 @@ export async function fetchAllDashboardData(): Promise<DashboardData> {
   ] = await Promise.allSettled([
     fetchTermStructure(),
     fetchTermSpreadsWithBtc(),
+    fetchBtcPrices(),
     fetchCurrentPendle(),
     fetchCurrentBtc(),
     fetchEthena(),
@@ -207,6 +210,7 @@ export async function fetchAllDashboardData(): Promise<DashboardData> {
   return {
     termStructure: termStructureRes.status === "fulfilled" ? termStructureRes.value : { date: "", maturities: [], termSpread: null },
     termSpreadsWithBtc: termSpreadsRes.status === "fulfilled" ? termSpreadsRes.value : [],
+    btcPrices: btcPricesRes.status === "fulfilled" ? btcPricesRes.value : [],
     currentPendle: currentPendleRes.status === "fulfilled" ? currentPendleRes.value : null,
     currentBtc: currentBtcRes.status === "fulfilled" ? currentBtcRes.value : null,
     ethena: ethenaRes.status === "fulfilled" ? ethenaRes.value : null,

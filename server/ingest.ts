@@ -2,6 +2,8 @@
 // Fetches data from all sources and stores in local SQLite.
 // Run once to seed, then daily via cron.
 
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import {
   db,
   upsertMarket,
@@ -12,6 +14,34 @@ import {
   upsertDefiLlamaApy,
   insertSyncLog,
 } from "./db.js";
+
+// Load .env for API keys
+function loadEnv() {
+  try {
+    const envPath = resolve(import.meta.dirname ?? ".", "../.env");
+    const content = readFileSync(envPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      if (!process.env[key]) process.env[key] = val;
+    }
+  } catch {
+    // .env not found — keys might be in environment already
+  }
+}
+loadEnv();
+
+const CG_API_KEY = process.env.COINGECKO_API_KEY;
+// Use Pro API if key available, otherwise fall back to free
+const CG_BASE = CG_API_KEY
+  ? "https://pro-api.coingecko.com/api/v3"
+  : "https://api.coingecko.com/api/v3";
+const CG_HEADERS: Record<string, string> = { Accept: "application/json" };
+if (CG_API_KEY) CG_HEADERS["x-cg-pro-api-key"] = CG_API_KEY;
 
 const PENDLE_BASE = "https://api-v2.pendle.finance/core";
 const CHAIN_ID = 1;
@@ -31,6 +61,13 @@ const SUSDE_MARKETS: { address: string; expiry: string }[] = [
 
 async function fetchJSON<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json() as Promise<T>;
+}
+
+async function fetchCoinGecko<T>(path: string): Promise<T> {
+  const url = `${CG_BASE}${path}`;
+  const res = await fetch(url, { headers: CG_HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   return res.json() as Promise<T>;
 }
@@ -221,33 +258,79 @@ export async function ingestDefiLlama() {
 
 // ─── BTC PRICE INGESTION ────────────────────────────────────────────────────
 
+function insertBtcPrices(prices: [number, number][]): number {
+  const insertMany = db.transaction((rows: [number, number][]) => {
+    for (const [ts, price] of rows) {
+      const d = new Date(ts);
+      const date = d.toISOString().split("T")[0];
+      upsertBtcPrice.run({ date, price, change24h: null });
+    }
+  });
+  insertMany(prices);
+  return prices.length;
+}
+
 export async function ingestBtcPrices() {
-  console.log("=== Ingesting BTC prices (CoinGecko) ===");
+  console.log(`=== Ingesting BTC prices (CoinGecko ${CG_API_KEY ? "Pro" : "Free"}) ===`);
+  let totalInserted = 0;
+
   try {
-    // Fetch max history (CoinGecko free: up to 365 days)
-    const resp = await fetchJSON<{ prices: [number, number][] }>(
-      "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=365"
+    // 1. Fetch recent 365 days
+    console.log("  Fetching recent 365 days...");
+    const resp = await fetchCoinGecko<{ prices: [number, number][] }>(
+      "/coins/bitcoin/market_chart?vs_currency=usd&days=365"
     );
-    const prices = resp.prices || [];
-
-    const insertMany = db.transaction((rows: [number, number][]) => {
-      for (const [ts, price] of rows) {
-        const d = new Date(ts);
-        const date = d.toISOString().split("T")[0];
-        upsertBtcPrice.run({ date, price, change24h: null });
-      }
-    });
-
-    insertMany(prices);
-    insertSyncLog.run({ source: "coingecko", records: prices.length, status: "ok", error: null });
-    console.log(`  Inserted ${prices.length} BTC price records.`);
-    return prices.length;
+    const recentPrices = resp.prices || [];
+    totalInserted += insertBtcPrices(recentPrices);
+    console.log(`    Got ${recentPrices.length} recent prices.`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    insertSyncLog.run({ source: "coingecko", records: 0, status: "error", error: msg });
-    console.error(`  Error: ${msg}`);
-    return 0;
+    console.error(`  Error fetching recent prices: ${err instanceof Error ? err.message : err}`);
   }
+
+  // 2. Backfill historical data to cover term spread period (2024-01-01 onwards)
+  //    With Pro key: /market_chart/range is available and supports long ranges.
+  //    Without Pro key: this will fail gracefully and skip.
+  const backfillRanges = [
+    { from: "2024-01-01", to: "2024-04-01" },
+    { from: "2024-04-01", to: "2024-07-01" },
+    { from: "2024-07-01", to: "2024-10-01" },
+    { from: "2024-10-01", to: "2025-01-01" },
+    { from: "2025-01-01", to: "2025-04-01" },
+  ];
+
+  for (const range of backfillRanges) {
+    try {
+      // Check if we already have data for this range
+      const existing = db.prepare(
+        "SELECT COUNT(*) as c FROM btc_prices WHERE date >= ? AND date <= ?"
+      ).get(range.from, range.to) as { c: number };
+
+      if (existing.c > 60) {
+        console.log(`  Skipping ${range.from} → ${range.to} (already have ${existing.c} rows)`);
+        continue;
+      }
+
+      const fromTs = Math.floor(new Date(range.from).getTime() / 1000);
+      const toTs = Math.floor(new Date(range.to).getTime() / 1000);
+
+      console.log(`  Backfilling ${range.from} → ${range.to}...`);
+      const resp = await fetchCoinGecko<{ prices: [number, number][] }>(
+        `/coins/bitcoin/market_chart/range?vs_currency=usd&from=${fromTs}&to=${toTs}`
+      );
+      const prices = resp.prices || [];
+      totalInserted += insertBtcPrices(prices);
+      console.log(`    Got ${prices.length} prices.`);
+
+      // Rate limit
+      await new Promise((r) => setTimeout(r, 500));
+    } catch (err) {
+      console.error(`  Error backfilling ${range.from}→${range.to}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  insertSyncLog.run({ source: "coingecko", records: totalInserted, status: "ok", error: null });
+  console.log(`  Total BTC price records inserted: ${totalInserted}`);
+  return totalInserted;
 }
 
 // ─── ETHENA YIELD INGESTION ─────────────────────────────────────────────────

@@ -2,11 +2,33 @@
 // Serves term structure data from local SQLite to the React dashboard.
 // Also runs daily auto-sync via node-cron.
 
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 import { db } from "./db.js";
 import { fullSync, ingestAllPendleMarkets, ingestEthenaYield, ingestBtcPrices, computeTermSpreads } from "./ingest.js";
+
+// Load .env for API keys
+try {
+  const envPath = resolve(import.meta.dirname ?? ".", "../.env");
+  const content = readFileSync(envPath, "utf-8");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    if (!process.env[key]) process.env[key] = val;
+  }
+} catch { /* .env not required */ }
+
+const CG_API_KEY = process.env.COINGECKO_API_KEY;
+const CG_BASE = CG_API_KEY ? "https://pro-api.coingecko.com/api/v3" : "https://api.coingecko.com/api/v3";
+const CG_HEADERS: Record<string, string> = { Accept: "application/json" };
+if (CG_API_KEY) CG_HEADERS["x-cg-pro-api-key"] = CG_API_KEY;
 
 const app = express();
 const PORT = 3001;
@@ -184,7 +206,8 @@ app.get("/api/current", async (_req, res) => {
 app.get("/api/btc-current", async (_req, res) => {
   try {
     const r = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
+      `${CG_BASE}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`,
+      { headers: CG_HEADERS }
     );
     const data = await r.json();
     res.json((data as any).bitcoin);

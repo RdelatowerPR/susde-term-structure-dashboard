@@ -129,13 +129,34 @@ interface DecileRow {
   color: string;
 }
 
-function computeDeciles(spreadsWithBtc: TermSpreadWithBtc[]): DecileRow[] {
+function computeDeciles(
+  spreadsWithBtc: TermSpreadWithBtc[],
+  btcPriceMap: Map<string, number>,
+): DecileRow[] {
   if (spreadsWithBtc.length < 20) return [];
 
   const sorted = [...spreadsWithBtc].sort((a, b) => a.term_spread - b.term_spread);
   const n = sorted.length;
   const decileSize = Math.floor(n / 10);
   const rows: DecileRow[] = [];
+
+  // Helper: find BTC price on or near a date (±3 days)
+  function findBtcPrice(dateStr: string): number | null {
+    const exact = btcPriceMap.get(dateStr);
+    if (exact != null) return exact;
+    // Try nearby dates (±1, ±2, ±3)
+    const d = new Date(dateStr);
+    for (let offset = 1; offset <= 3; offset++) {
+      for (const dir of [1, -1]) {
+        const nd = new Date(d);
+        nd.setDate(nd.getDate() + offset * dir);
+        const key = nd.toISOString().split("T")[0];
+        const price = btcPriceMap.get(key);
+        if (price != null) return price;
+      }
+    }
+    return null;
+  }
 
   for (let d = 0; d < 10; d++) {
     const start = d * decileSize;
@@ -144,18 +165,19 @@ function computeDeciles(spreadsWithBtc: TermSpreadWithBtc[]): DecileRow[] {
 
     const avgSpread = slice.reduce((s, r) => s + r.term_spread, 0) / slice.length;
 
-    // Compute avg 90d forward BTC return for this decile
+    // Compute avg 90d forward BTC return for this decile using the full BTC price map
     let avgReturn: number | null = null;
     const returns: number[] = [];
     for (const row of slice) {
+      const currentPrice = row.btc_price ?? findBtcPrice(row.date);
+      if (currentPrice == null || currentPrice <= 0) continue;
+
       const futureDate = new Date(row.date);
       futureDate.setDate(futureDate.getDate() + 90);
       const futureDateStr = futureDate.toISOString().split("T")[0];
-      const futureRow = spreadsWithBtc.find(
-        (r) => r.date >= futureDateStr && r.btc_price != null
-      );
-      if (futureRow?.btc_price != null && row.btc_price != null && row.btc_price > 0) {
-        returns.push(((futureRow.btc_price - row.btc_price) / row.btc_price) * 100);
+      const futurePrice = findBtcPrice(futureDateStr);
+      if (futurePrice != null) {
+        returns.push(((futurePrice - currentPrice) / currentPrice) * 100);
       }
     }
     if (returns.length > 0) {
@@ -354,10 +376,29 @@ export default function SUSDEDashboard() {
   const volume = data?.currentPendle ? data.currentPendle.tradingVolume.usd : null;
   const ptDiscount = data?.currentPendle ? data.currentPendle.ptDiscount * 100 : null;
 
+  // ── BTC price lookup map (all dates, not just term spread dates) ──
+  const btcPriceMap = useMemo(() => {
+    const map = new Map<string, number>();
+    if (data?.btcPrices) {
+      for (const bp of data.btcPrices) {
+        map.set(bp.date, bp.price);
+      }
+    }
+    // Also add any BTC prices from the term spread join
+    if (data?.termSpreadsWithBtc) {
+      for (const r of data.termSpreadsWithBtc) {
+        if (r.btc_price != null && !map.has(r.date)) {
+          map.set(r.date, r.btc_price);
+        }
+      }
+    }
+    return map;
+  }, [data?.btcPrices, data?.termSpreadsWithBtc]);
+
   // ── Computed analytics ──
   const deciles = useMemo(() =>
-    data?.termSpreadsWithBtc.length ? computeDeciles(data.termSpreadsWithBtc) : [],
-    [data?.termSpreadsWithBtc]
+    data?.termSpreadsWithBtc.length ? computeDeciles(data.termSpreadsWithBtc, btcPriceMap) : [],
+    [data?.termSpreadsWithBtc, btcPriceMap]
   );
 
   // Spread statistics
@@ -1356,19 +1397,36 @@ export default function SUSDEDashboard() {
                     <ReferenceLine y={0} stroke="#6e768130" strokeDasharray="3 3" />
                     <Scatter
                       data={(() => {
+                        // Helper: find BTC price on or near a date (±3 days) from the full map
+                        function findPrice(dateStr: string): number | null {
+                          const exact = btcPriceMap.get(dateStr);
+                          if (exact != null) return exact;
+                          const d = new Date(dateStr);
+                          for (let off = 1; off <= 3; off++) {
+                            for (const dir of [1, -1]) {
+                              const nd = new Date(d);
+                              nd.setDate(nd.getDate() + off * dir);
+                              const p = btcPriceMap.get(nd.toISOString().split("T")[0]);
+                              if (p != null) return p;
+                            }
+                          }
+                          return null;
+                        }
+
                         const points: { spread: number; fwdReturn: number }[] = [];
                         const rows = data.termSpreadsWithBtc;
                         for (let i = 0; i < rows.length; i++) {
-                          if (rows[i].btc_price == null) continue;
-                          // Find the row ~90 days later
+                          const currentPrice = rows[i].btc_price ?? findPrice(rows[i].date);
+                          if (currentPrice == null || currentPrice <= 0) continue;
+                          // Find BTC price ~90 days later from the full price map
                           const target = new Date(rows[i].date);
                           target.setDate(target.getDate() + 90);
                           const targetStr = target.toISOString().split("T")[0];
-                          const future = rows.find(r => r.date >= targetStr && r.btc_price != null);
-                          if (future && future.btc_price != null && rows[i].btc_price! > 0) {
+                          const futurePrice = findPrice(targetStr);
+                          if (futurePrice != null) {
                             points.push({
                               spread: rows[i].term_spread * 100,
-                              fwdReturn: ((future.btc_price! - rows[i].btc_price!) / rows[i].btc_price!) * 100,
+                              fwdReturn: ((futurePrice - currentPrice) / currentPrice) * 100,
                             });
                           }
                         }
@@ -1421,16 +1479,19 @@ export default function SUSDEDashboard() {
                 <ResponsiveContainer width="100%" height={350}>
                   <ComposedChart
                     data={(() => {
-                      // Compute 30d rolling realized vol from BTC prices
-                      const rows = data.termSpreadsWithBtc.filter(r => r.btc_price != null);
+                      // Enrich term spread rows with BTC prices from the full map
+                      const rows = data.termSpreadsWithBtc.map(r => ({
+                        ...r,
+                        btc: r.btc_price ?? btcPriceMap.get(r.date) ?? null,
+                      })).filter(r => r.btc != null);
                       const result: { date: string; dateShort: string; spread: number; vol30d: number | null }[] = [];
                       for (let i = 0; i < rows.length; i++) {
                         let vol: number | null = null;
                         if (i >= 30) {
                           const returns: number[] = [];
                           for (let j = i - 29; j <= i; j++) {
-                            if (rows[j].btc_price && rows[j - 1]?.btc_price) {
-                              returns.push(Math.log(rows[j].btc_price! / rows[j - 1].btc_price!));
+                            if (rows[j].btc && rows[j - 1]?.btc) {
+                              returns.push(Math.log(rows[j].btc! / rows[j - 1].btc!));
                             }
                           }
                           if (returns.length > 5) {
