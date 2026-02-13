@@ -1288,23 +1288,29 @@ export default function SUSDEDashboard() {
                   <ResponsiveContainer width="100%" height={350}>
                     <ComposedChart
                       data={(() => {
-                        // Merge BTC price and DefiLlama APY by date
-                        const spreadMap = new Map<string, { btc?: number; apy?: number }>();
+                        // Merge ALL BTC prices and DefiLlama APY by date
+                        const merged = new Map<string, { btc?: number; apy?: number }>();
+                        // 1. Full BTC price history (covers Apr 2024 → present)
+                        for (const bp of data.btcPrices) {
+                          const entry = merged.get(bp.date) ?? {};
+                          entry.btc = bp.price;
+                          merged.set(bp.date, entry);
+                        }
+                        // 2. Also pick up any BTC from term spread join
                         for (const r of data.termSpreadsWithBtc) {
                           if (r.btc_price != null) {
-                            const entry = spreadMap.get(r.date) ?? {};
-                            entry.btc = r.btc_price;
-                            if (r.defillama_apy != null) entry.apy = r.defillama_apy;
-                            spreadMap.set(r.date, entry);
+                            const entry = merged.get(r.date) ?? {};
+                            if (!entry.btc) entry.btc = r.btc_price;
+                            merged.set(r.date, entry);
                           }
                         }
-                        // Also add standalone defilama/btc data
+                        // 3. DefiLlama APY history
                         for (const r of data.defiLlama) {
-                          const entry = spreadMap.get(r.date) ?? {};
+                          const entry = merged.get(r.date) ?? {};
                           entry.apy = r.apy;
-                          spreadMap.set(r.date, entry);
+                          merged.set(r.date, entry);
                         }
-                        return Array.from(spreadMap.entries())
+                        return Array.from(merged.entries())
                           .sort((a, b) => a[0].localeCompare(b[0]))
                           .filter(([, v]) => v.btc || v.apy)
                           .filter((_, i, arr) => i % Math.max(1, Math.floor(arr.length / 300)) === 0)
