@@ -47,14 +47,25 @@ if (CG_API_KEY) CG_HEADERS["x-cg-pro-api-key"] = CG_API_KEY;
 const PENDLE_BASE = "https://api-v2.pendle.finance/core";
 const CHAIN_ID = 1;
 
-// All known sUSDe market addresses on Ethereum mainnet
+// Complete sUSDe Pendle market list — discovered via Pendle API:
+// https://api-v2.pendle.finance/core/v1/1/markets?q=sUSDe
 const SUSDE_MARKETS: { address: string; expiry: string }[] = [
+  // 2024 maturities
   { address: "0x8f7627bd46b30e296aa3aabe1df9bfac10920b6e", expiry: "2024-04-25" },
+  { address: "0x107a2e3cd2bb9a32b9ee2e4d51143149f8367eba", expiry: "2024-07-25" },
   { address: "0x93a82f3873e5b4ff81902663c43286d662f6721c", expiry: "2024-09-26" },
   { address: "0xd1d7d99764f8a52aff007b7831cc02748b2013b5", expiry: "2024-09-26" },
   { address: "0xbbf399db59a845066aafce9ae55e68c505fa97b7", expiry: "2024-10-24" },
   { address: "0xa0ab94debb3cc9a7ea77f3205ba4ab23276fed08", expiry: "2024-12-26" },
+  // 2025 maturities
+  { address: "0xd3c29550d12a5234e6aeb5aea7c841134cd6ddd5", expiry: "2025-02-27" },
   { address: "0xcdd26eb5eb2ce0f203a84553853667ae69ca29ce", expiry: "2025-03-27" },
+  { address: "0xb162b764044697cf03617c2efbcb1f42e31e4766", expiry: "2025-05-29" },
+  { address: "0x4339ffe2b7592dc783ed13cce310531ab366deac", expiry: "2025-07-31" },
+  { address: "0xa36b60a14a1a5247912584768c6e53e1a269a9f7", expiry: "2025-09-25" },
+  { address: "0xb6ac3d5da138918ac4e84441e924a20daa60dbdd", expiry: "2025-11-27" },
+  // 2026 maturities
+  { address: "0xed81f8ba2941c3979de2265c295748a6b6956567", expiry: "2026-02-05" },
   { address: "0x8dae8ece668cf80d348873f23d456448e8694883", expiry: "2026-05-07" },
 ];
 

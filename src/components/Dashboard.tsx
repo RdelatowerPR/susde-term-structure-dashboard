@@ -143,7 +143,15 @@ interface DecileRow {
   count: number;
   avgSpread: number;
   avgBtcReturn90d: number | null;
+  medianBtcReturn90d: number | null;
   color: string;
+}
+
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function computeDeciles(
@@ -208,6 +216,7 @@ function computeDeciles(
       count: slice.length,
       avgSpread: avgSpread * 100,
       avgBtcReturn90d: avgReturn,
+      medianBtcReturn90d: returns.length > 0 ? median(returns) : null,
       color: `hsl(${hue}, 70%, 55%)`,
     });
   }
@@ -932,6 +941,68 @@ export default function SUSDEDashboard() {
         {/* ─── TAB: TERM STRUCTURE ─── */}
         {activeTab === "termstructure" && (
           <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
+            {/* Front Rate vs Back Rate — Blockworks iconic chart */}
+            <div style={{
+              background: "#161b22", border: "1px solid #21262d",
+              borderRadius: 8, padding: 20,
+            }}>
+              <SectionHeader
+                icon="📈"
+                title="Pendle sUSDe Implied Yield: Front Rate vs Back Rate"
+                subtitle="Blue = front month implied yield · Green = back month · Gap between them = term spread"
+              />
+              {data?.termSpreadsWithBtc.length ? (
+                <ResponsiveContainer width="100%" height={380}>
+                  <ComposedChart
+                    data={data.termSpreadsWithBtc
+                      .filter(r => r.num_maturities >= 2)
+                      .map(r => ({
+                        date: r.date,
+                        dateShort: r.date.slice(5),
+                        front: r.front_implied * 100,
+                        back: r.back_implied * 100,
+                      }))}
+                    margin={{ top: 10, right: 20, bottom: 10, left: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+                    <XAxis
+                      dataKey="dateShort"
+                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                      axisLine={{ stroke: "#21262d" }}
+                      interval={Math.max(1, Math.floor(data.termSpreadsWithBtc.filter(r => r.num_maturities >= 2).length / 15))}
+                    />
+                    <YAxis
+                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                      axisLine={{ stroke: "#21262d" }}
+                      unit="%"
+                      label={{ value: "Implied Yield %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                    />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Line
+                      type="monotone" dataKey="front"
+                      stroke="#388bfd" strokeWidth={2} dot={false}
+                      name="Front Rate" unit="%"
+                    />
+                    <Line
+                      type="monotone" dataKey="back"
+                      stroke="#3fb950" strokeWidth={2} dot={false}
+                      name="Back Rate" unit="%"
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <LoadingSpinner />
+              )}
+              <div style={{
+                marginTop: 8, color: "#6e7681", fontSize: "0.6rem",
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                When back rate {">"} front rate → contango (bullish BTC).
+                When front rate {">"} back rate → backwardation (bearish BTC).
+                Only dates with ≥2 active maturities are shown.
+              </div>
+            </div>
+
             {/* Multi-maturity curve */}
             <div style={{
               background: "#161b22", border: "1px solid #21262d",
@@ -1693,17 +1764,17 @@ export default function SUSDEDashboard() {
             }}>
               <SectionHeader
                 icon="📊"
-                title="Term Spread Decile Analysis"
-                subtitle="Observations sorted into 10 bins by spread value · Shows avg 90d forward BTC return per decile"
+                title="Term Spread Percentile and Forward Return Skew (90d)"
+                subtitle="Bottom decile shows most negative returns · Top decile shows most positive · Blockworks methodology"
               />
               {deciles.length ? (
                 <>
-                  <ResponsiveContainer width="100%" height={350}>
+                  <ResponsiveContainer width="100%" height={380}>
                     <BarChart
                       data={deciles.map(d => ({
-                        decile: `D${d.decile}`,
-                        avgSpread: d.avgSpread,
+                        decile: `${(d.decile - 1) * 10}-${d.decile * 10}%`,
                         avgReturn: d.avgBtcReturn90d,
+                        medianReturn: d.medianBtcReturn90d,
                         count: d.count,
                       }))}
                       margin={{ top: 10, right: 20, bottom: 10, left: 0 }}
@@ -1711,26 +1782,20 @@ export default function SUSDEDashboard() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
                       <XAxis
                         dataKey="decile"
-                        tick={{ fill: "#6e7681", fontSize: 11, fontFamily: "'JetBrains Mono'" }}
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
                         axisLine={{ stroke: "#21262d" }}
+                        label={{ value: "Term Spread Percentile", position: "insideBottom", offset: -5, fill: "#6e7681", fontSize: 10 }}
                       />
                       <YAxis
                         tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
                         axisLine={{ stroke: "#21262d" }}
                         unit="%"
-                        label={{ value: "Avg 90d BTC Return %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                        label={{ value: "Forward Return Skew (90d)", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
                       />
                       <Tooltip content={<CustomTooltip />} />
                       <ReferenceLine y={0} stroke="#6e768150" strokeDasharray="5 5" />
-                      <Bar dataKey="avgReturn" name="Avg 90d BTC Return" unit="%" radius={[4, 4, 0, 0]}>
-                        {deciles.map((d, i) => (
-                          <Cell
-                            key={i}
-                            fill={d.avgBtcReturn90d != null && d.avgBtcReturn90d > 0 ? "#00ff88" : "#ff5544"}
-                            fillOpacity={0.7}
-                          />
-                        ))}
-                      </Bar>
+                      <Bar dataKey="medianReturn" name="Median Return Skew (90d)" unit="%" radius={[3, 3, 0, 0]} fill="#7c3aed" fillOpacity={0.85} />
+                      <Bar dataKey="avgReturn" name="Mean Return Skew (90d)" unit="%" radius={[3, 3, 0, 0]} fill="#f472b6" fillOpacity={0.85} />
                     </BarChart>
                   </ResponsiveContainer>
 
@@ -1742,7 +1807,7 @@ export default function SUSDEDashboard() {
                     }}>
                       <thead>
                         <tr style={{ borderBottom: "1px solid #21262d" }}>
-                          {["Decile", "Spread Range", "Count", "Avg Spread", "Avg 90d BTC Return"].map(h => (
+                          {["Percentile", "Spread Range", "N", "Avg Spread", "Mean 90d Return", "Median 90d Return"].map(h => (
                             <th key={h} style={{ color: "#6e7681", padding: "8px 12px", textAlign: "right", fontWeight: 500 }}>{h}</th>
                           ))}
                         </tr>
@@ -1750,7 +1815,7 @@ export default function SUSDEDashboard() {
                       <tbody>
                         {deciles.map((d, i) => (
                           <tr key={i} style={{ borderBottom: "1px solid #161b22" }}>
-                            <td style={{ color: "#e6edf3", padding: "6px 12px", textAlign: "right", fontWeight: 600 }}>D{d.decile}</td>
+                            <td style={{ color: "#e6edf3", padding: "6px 12px", textAlign: "right", fontWeight: 600 }}>{(d.decile - 1) * 10}-{d.decile * 10}%</td>
                             <td style={{ color: "#8b949e", padding: "6px 12px", textAlign: "right" }}>{d.range}</td>
                             <td style={{ color: "#8b949e", padding: "6px 12px", textAlign: "right" }}>{d.count}</td>
                             <td style={{
@@ -1761,12 +1826,22 @@ export default function SUSDEDashboard() {
                             </td>
                             <td style={{
                               color: d.avgBtcReturn90d != null
-                                ? d.avgBtcReturn90d > 0 ? "#00ff88" : "#ff5544"
+                                ? d.avgBtcReturn90d > 0 ? "#f472b6" : "#ff5544"
                                 : "#6e7681",
                               padding: "6px 12px", textAlign: "right", fontWeight: 600,
                             }}>
                               {d.avgBtcReturn90d != null
                                 ? `${d.avgBtcReturn90d > 0 ? "+" : ""}${d.avgBtcReturn90d.toFixed(1)}%`
+                                : "—"}
+                            </td>
+                            <td style={{
+                              color: d.medianBtcReturn90d != null
+                                ? d.medianBtcReturn90d > 0 ? "#7c3aed" : "#ff5544"
+                                : "#6e7681",
+                              padding: "6px 12px", textAlign: "right", fontWeight: 600,
+                            }}>
+                              {d.medianBtcReturn90d != null
+                                ? `${d.medianBtcReturn90d > 0 ? "+" : ""}${d.medianBtcReturn90d.toFixed(1)}%`
                                 : "—"}
                             </td>
                           </tr>
@@ -1827,6 +1902,95 @@ export default function SUSDEDashboard() {
                         />
                       ))}
                     </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ color: "#6e7681", fontSize: "0.7rem", textAlign: "center", padding: 40 }}>
+                  Insufficient data
+                </div>
+              )}
+            </div>
+
+            {/* Term Spread Bucket vs Mean Forward Return Skew — Blockworks Chart C */}
+            <div style={{
+              background: "#161b22", border: "1px solid #21262d",
+              borderRadius: 8, padding: 20,
+            }}>
+              <SectionHeader
+                icon="📉"
+                title="Term Spread and Mean Forward Return Skew (90d)"
+                subtitle="Fixed spread ranges (in % points) vs mean 3-month forward BTC return skew · Blockworks methodology"
+              />
+              {data?.termSpreadsWithBtc.length ? (
+                <ResponsiveContainer width="100%" height={350}>
+                  <BarChart
+                    data={(() => {
+                      // Define fixed spread buckets matching Blockworks: (12-10), (10-8), ... 0-2
+                      const bucketDefs = [
+                        { label: "(<-10)", min: -Infinity, max: -10 },
+                        { label: "(10-8)", min: -10, max: -8 },
+                        { label: "(8-6)", min: -8, max: -6 },
+                        { label: "(6-4)", min: -6, max: -4 },
+                        { label: "(4-2)", min: -4, max: -2 },
+                        { label: "(2-0)", min: -2, max: 0 },
+                        { label: "0-2", min: 0, max: 2 },
+                        { label: "2+", min: 2, max: Infinity },
+                      ];
+
+                      // Helper: find BTC price
+                      function findPrice(dateStr: string): number | null {
+                        const exact = btcPriceMap.get(dateStr);
+                        if (exact != null) return exact;
+                        const d = new Date(dateStr);
+                        for (let off = 1; off <= 3; off++) {
+                          for (const dir of [1, -1]) {
+                            const nd = new Date(d);
+                            nd.setDate(nd.getDate() + off * dir);
+                            const p = btcPriceMap.get(nd.toISOString().split("T")[0]);
+                            if (p != null) return p;
+                          }
+                        }
+                        return null;
+                      }
+
+                      return bucketDefs.map(b => {
+                        const rows = data.termSpreadsWithBtc.filter(r => {
+                          const s = r.term_spread * 100;
+                          return s >= b.min && s < b.max;
+                        });
+                        const returns: number[] = [];
+                        for (const row of rows) {
+                          const currentPrice = row.btc_price ?? findPrice(row.date);
+                          if (currentPrice == null || currentPrice <= 0) continue;
+                          const futD = new Date(row.date);
+                          futD.setDate(futD.getDate() + 90);
+                          const futPrice = findPrice(futD.toISOString().split("T")[0]);
+                          if (futPrice != null) {
+                            returns.push(((futPrice - currentPrice) / currentPrice) * 100);
+                          }
+                        }
+                        const meanRet = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : null;
+                        return { bucket: b.label, meanReturn: meanRet, count: rows.length };
+                      }).filter(b => b.count > 0);
+                    })()}
+                    margin={{ top: 10, right: 20, bottom: 20, left: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+                    <XAxis
+                      dataKey="bucket"
+                      tick={{ fill: "#6e7681", fontSize: 11, fontFamily: "'JetBrains Mono'" }}
+                      axisLine={{ stroke: "#21262d" }}
+                      label={{ value: "Term Spread", position: "insideBottom", offset: -10, fill: "#6e7681", fontSize: 10 }}
+                    />
+                    <YAxis
+                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                      axisLine={{ stroke: "#21262d" }}
+                      unit="%"
+                      label={{ value: "Mean Forward Return Skew", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                    />
+                    <Tooltip content={<CustomTooltip />} />
+                    <ReferenceLine y={0} stroke="#6e768150" strokeDasharray="5 5" />
+                    <Bar dataKey="meanReturn" name="3mo fwd return skew (mean)" unit="%" radius={[4, 4, 0, 0]} fill="#7c3aed" fillOpacity={0.85} />
                   </BarChart>
                 </ResponsiveContainer>
               ) : (
