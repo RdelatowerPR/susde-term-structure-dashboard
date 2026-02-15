@@ -9,6 +9,7 @@ import {
   upsertMarket,
   upsertSnapshot,
   upsertTermSpread,
+  updateTermSpread7dma,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,
@@ -105,11 +106,19 @@ export async function ingestPendleMarket(market: { address: string; expiry: stri
     const resp = await fetchJSON<{ results: PendleHistEntry[] }>(
       `${PENDLE_BASE}/v2/${CHAIN_ID}/markets/${address}/historical-data?time_frame=day`
     );
-    const entries = resp.results || [];
+    let entries = resp.results || [];
 
     if (entries.length === 0) {
       console.log(`    No historical data found.`);
       return 0;
+    }
+
+    // ── Blockworks methodology: trim first/last entries at maturity boundaries ──
+    // The first and last data points at market initialization and expiration
+    // often have distorted implied yields due to low liquidity. Remove them.
+    if (entries.length > 2) {
+      entries = entries.slice(1, -1);
+      console.log(`    Trimmed first/last entries (outlier removal). ${entries.length} remain.`);
     }
 
     const insertMany = db.transaction((rows: PendleHistEntry[]) => {
@@ -157,16 +166,17 @@ export async function ingestAllPendleMarkets() {
 export function computeTermSpreads() {
   console.log("=== Computing term spreads ===");
 
-  // Get all dates that have ≥2 distinct expiry markets
+  // Get ALL dates with snapshots (including single-maturity dates)
   const dates = db.prepare(`
     SELECT date, COUNT(DISTINCT expiry) as num_expiries
     FROM daily_snapshots
     GROUP BY date
-    HAVING num_expiries >= 2
     ORDER BY date
   `).all() as { date: string; num_expiries: number }[];
 
-  console.log(`  Found ${dates.length} dates with ≥2 maturities.`);
+  const multiDates = dates.filter(d => d.num_expiries >= 2).length;
+  const singleDates = dates.filter(d => d.num_expiries === 1).length;
+  console.log(`  Found ${multiDates} dates with ≥2 maturities, ${singleDates} with 1 maturity.`);
 
   const computeMany = db.transaction((datesToProcess: { date: string; num_expiries: number }[]) => {
     for (const { date, num_expiries } of datesToProcess) {
@@ -184,43 +194,100 @@ export function computeTermSpreads() {
         days_to_expiry: number;
       }[];
 
-      if (snapshots.length < 2) continue;
+      if (snapshots.length === 0) continue;
 
-      // Get unique expiries, pick front (nearest) and back (furthest)
+      // Get unique expiries
       const uniqueExpiries = [...new Set(snapshots.map((s) => s.expiry))].sort();
-      if (uniqueExpiries.length < 2) continue;
 
-      const frontExpiry = uniqueExpiries[0];
-      const backExpiry = uniqueExpiries[uniqueExpiries.length - 1];
+      if (uniqueExpiries.length >= 2) {
+        // ── Multi-maturity: compute real term spread ──
+        const frontExpiry = uniqueExpiries[0];
+        const backExpiry = uniqueExpiries[uniqueExpiries.length - 1];
 
-      // Pick the snapshot for each (if multiple markets share same expiry, average them)
-      const frontSnaps = snapshots.filter((s) => s.expiry === frontExpiry);
-      const backSnaps = snapshots.filter((s) => s.expiry === backExpiry);
+        const frontSnaps = snapshots.filter((s) => s.expiry === frontExpiry);
+        const backSnaps = snapshots.filter((s) => s.expiry === backExpiry);
 
-      const frontImplied = frontSnaps.reduce((sum, s) => sum + s.implied_apy, 0) / frontSnaps.length;
-      const backImplied = backSnaps.reduce((sum, s) => sum + s.implied_apy, 0) / backSnaps.length;
-      const termSpread = backImplied - frontImplied;
-      const underlyingApy = frontSnaps[0].underlying_apy;
+        const frontImplied = frontSnaps.reduce((sum, s) => sum + s.implied_apy, 0) / frontSnaps.length;
+        const backImplied = backSnaps.reduce((sum, s) => sum + s.implied_apy, 0) / backSnaps.length;
+        const termSpread = backImplied - frontImplied;
+        const underlyingApy = frontSnaps[0].underlying_apy;
 
-      upsertTermSpread.run({
-        date,
-        frontAddr: frontSnaps[0].market_addr,
-        frontExpiry,
-        frontImplied,
-        backAddr: backSnaps[0].market_addr,
-        backExpiry,
-        backImplied,
-        termSpread,
-        underlyingApy,
-        numMaturities: uniqueExpiries.length,
-      });
+        upsertTermSpread.run({
+          date,
+          frontAddr: frontSnaps[0].market_addr,
+          frontExpiry,
+          frontImplied,
+          backAddr: backSnaps[0].market_addr,
+          backExpiry,
+          backImplied,
+          termSpread,
+          underlyingApy,
+          numMaturities: uniqueExpiries.length,
+        });
+      } else {
+        // ── Single maturity: record spread = 0 per Blockworks methodology ──
+        // With only one maturity, there is no term spread signal.
+        // The report records zero for these periods rather than skipping them.
+        const snap = snapshots[0];
+        upsertTermSpread.run({
+          date,
+          frontAddr: snap.market_addr,
+          frontExpiry: snap.expiry,
+          frontImplied: snap.implied_apy,
+          backAddr: snap.market_addr,      // same as front (only 1 maturity)
+          backExpiry: snap.expiry,
+          backImplied: snap.implied_apy,
+          termSpread: 0,                   // no signal
+          underlyingApy: snap.underlying_apy,
+          numMaturities: 1,
+        });
+      }
     }
   });
 
   computeMany(dates);
+
   const count = db.prepare("SELECT COUNT(*) as c FROM term_spreads").get() as { c: number };
-  console.log(`  Term spread records: ${count.c}`);
+  const multiCount = (db.prepare("SELECT COUNT(*) as c FROM term_spreads WHERE num_maturities >= 2").get() as { c: number }).c;
+  const singleCount = (db.prepare("SELECT COUNT(*) as c FROM term_spreads WHERE num_maturities = 1").get() as { c: number }).c;
+  console.log(`  Term spread records: ${count.c} (${multiCount} multi-maturity, ${singleCount} single-maturity=0)`);
   return count.c;
+}
+
+// ─── 7-DAY MOVING AVERAGE ──────────────────────────────────────────────────
+// Blockworks methodology: term spread is measured on a 7-day moving average basis.
+// This smooths out daily noise and produces the signal used for regime classification.
+
+export function compute7DayMA() {
+  console.log("=== Computing 7-day moving average of term spread ===");
+
+  // Get all term spreads in date order
+  const rows = db.prepare(`
+    SELECT date, term_spread FROM term_spreads ORDER BY date ASC
+  `).all() as { date: string; term_spread: number }[];
+
+  if (rows.length === 0) {
+    console.log("  No term spreads to smooth.");
+    return;
+  }
+
+  const updateMany = db.transaction((updates: { date: string; termSpread7dma: number }[]) => {
+    for (const u of updates) {
+      updateTermSpread7dma.run(u);
+    }
+  });
+
+  const updates: { date: string; termSpread7dma: number }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    // Compute 7-day trailing average (use as many as available for first 6 days)
+    const windowStart = Math.max(0, i - 6); // 7-day window: [i-6, i]
+    const window = rows.slice(windowStart, i + 1);
+    const avg = window.reduce((sum, r) => sum + r.term_spread, 0) / window.length;
+    updates.push({ date: rows[i].date, termSpread7dma: avg });
+  }
+
+  updateMany(updates);
+  console.log(`  Updated ${updates.length} rows with 7-day MA.`);
 }
 
 // ─── DEFILLAMA INGESTION ────────────────────────────────────────────────────
@@ -381,6 +448,7 @@ export async function fullSync() {
   await ingestBtcPrices();
   await ingestEthenaYield();
   computeTermSpreads();
+  compute7DayMA();
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`\nSync complete in ${elapsed}s.`);

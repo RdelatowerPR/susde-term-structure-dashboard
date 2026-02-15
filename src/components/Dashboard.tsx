@@ -27,8 +27,9 @@ const _HISTORICAL_STD_SPREAD = 3.5; // approximate 1σ (kept for reference)
 // Flat      (spread ≈ 0): no strong directional bias
 // Backwardation (spread < 0): back < front → market expects declining funding → bearish BTC
 //
-// When only 1 maturity is available, we fall back to:
-//   implied_premium = pendle_implied_apy − underlying_susde_apy
+// When only 1 maturity is available, the spread is 0 per Blockworks methodology
+// (no signal can be extracted from a single maturity — regime is NEUTRAL).
+// The report uses a 7-day moving average of the term spread for regime classification.
 
 interface CurveInterpretation {
   shape: string;
@@ -37,30 +38,46 @@ interface CurveInterpretation {
   regime: string;
   regimeColor: string;
   spreadValue: number;
-  spreadType: "term_spread" | "implied_premium";
+  spreadType: "term_spread_7dma" | "term_spread" | "single_maturity";
   probPositive90d: number;
   btcOutlook: string;
   btcOutlookColor: string;
 }
 
-function interpretTermSpread(spreadPct: number, isRealSpread: boolean): CurveInterpretation {
+function interpretTermSpread(
+  spreadPct: number,
+  spreadType: "term_spread_7dma" | "term_spread" | "single_maturity",
+): CurveInterpretation {
   // Term spread thresholds (in percentage points)
   // Using Blockworks report framework: mean ~ -2.63%, σ ~ 3.5%
-  const spreadType = isRealSpread ? "term_spread" as const : "implied_premium" as const;
+
+  // Single maturity → no signal, force NEUTRAL
+  if (spreadType === "single_maturity") {
+    return {
+      shape: "SINGLE MATURITY",
+      shapeColor: "#6e7681",
+      description: "Only one sUSDe maturity is currently active on Pendle. Per the Blockworks methodology, a term spread requires two or more simultaneous markets with different expiry dates. The spread is recorded as zero — no directional signal can be extracted.",
+      regime: "NO SIGNAL",
+      regimeColor: "#6e7681",
+      spreadValue: 0,
+      spreadType: "single_maturity",
+      probPositive90d: 50,
+      btcOutlook: "No signal — single maturity cannot produce a term spread",
+      btcOutlookColor: "#6e7681",
+    };
+  }
+
+  const isSmoothed = spreadType === "term_spread_7dma";
 
   let shape: string, shapeColor: string, description: string;
   if (spreadPct > 2) {
     shape = "STEEP CONTANGO";
     shapeColor = "#00ff88";
-    description = isRealSpread
-      ? "The back-month implied yield is sharply above the front-month. The forward curve slopes steeply upward — strong conviction that funding rates will remain elevated or increase. Historically the most reliable bullish BTC signal: contango (~11% of observations) preceded 80%+ positive 90d return skew."
-      : "The Pendle implied yield is sharply above the underlying sUSDe APY. Market participants are willing to lock in a significantly higher rate, signaling strong conviction that funding rates will remain elevated.";
+    description = "The back-month implied yield is sharply above the front-month. The forward curve slopes steeply upward — strong conviction that funding rates will remain elevated or increase. Historically the most reliable bullish BTC signal: contango (~11% of observations) preceded 80%+ positive 90d return skew.";
   } else if (spreadPct > 0.5) {
     shape = "CONTANGO";
     shapeColor = "#66ffaa";
-    description = isRealSpread
-      ? "The back-month implied yield prices above the front-month — a forward-upsloping curve. The market expects funding rates to persist or rise. Contango has been the strongest bullish indicator for BTC forward returns."
-      : "Implied yield prices above the underlying — the market expects funding rates to persist or rise.";
+    description = "The back-month implied yield prices above the front-month — a forward-upsloping curve. The market expects funding rates to persist or rise. Contango has been the strongest bullish indicator for BTC forward returns.";
   } else if (spreadPct > -0.5) {
     shape = "FLAT";
     shapeColor = "#ffd866";
@@ -68,15 +85,15 @@ function interpretTermSpread(spreadPct: number, isRealSpread: boolean): CurveInt
   } else if (spreadPct > -5) {
     shape = "BACKWARDATION";
     shapeColor = "#ff9944";
-    description = isRealSpread
-      ? "The back-month implied yield is below the front-month — an inverted curve. The market expects funding rates to decline from current levels. This is the most common regime historically, centered around the mean spread."
-      : "Implied yield is below the underlying — the market expects funding rates to decline from current levels.";
+    description = "The back-month implied yield is below the front-month — an inverted curve. The market expects funding rates to decline from current levels. This is the most common regime historically, centered around the mean spread.";
   } else {
     shape = "STEEP BACKWARDATION";
     shapeColor = "#ff5544";
-    description = isRealSpread
-      ? "The term structure is deeply inverted. The market expects a substantial decline in funding rates. Steep backwardation (<−7.5% in the report) was observed in ~8% of readings and preceded exclusively negative forward BTC return skew."
-      : "Implied yield is sharply below the underlying — the market expects a substantial decline in funding rates.";
+    description = "The term structure is deeply inverted. The market expects a substantial decline in funding rates. Steep backwardation (<−7.5% in the report) was observed in ~8% of readings and preceded exclusively negative forward BTC return skew.";
+  }
+
+  if (isSmoothed) {
+    description += " (Based on 7-day moving average per Blockworks methodology.)";
   }
 
   let regime: string, regimeColor: string, btcOutlook: string, btcOutlookColor: string;
@@ -361,15 +378,29 @@ export default function SUSDEDashboard() {
     ? data.currentPendle.underlyingInterestApy * 100
     : null;
 
-  // Use real term spread if available in the latest term structure, else fall back to implied premium
+  // Determine spread value and type for regime classification
+  // Priority: 7dma > raw term spread > single maturity (0)
   const latestSpread = data?.termStructure?.termSpread;
-  const hasRealSpread = latestSpread != null && latestSpread.term_spread != null;
-  const spreadValue = hasRealSpread
-    ? latestSpread.term_spread * 100
-    : (impliedApy !== null && underlyingApy !== null ? impliedApy - underlyingApy : null);
+  const hasMultiMaturity = latestSpread != null && latestSpread.num_maturities >= 2;
+  const has7dma = latestSpread != null && latestSpread.term_spread_7dma != null;
+
+  let spreadValue: number | null = null;
+  let spreadType: "term_spread_7dma" | "term_spread" | "single_maturity" = "single_maturity";
+
+  if (hasMultiMaturity && has7dma) {
+    spreadValue = latestSpread.term_spread_7dma! * 100;
+    spreadType = "term_spread_7dma";
+  } else if (hasMultiMaturity) {
+    spreadValue = latestSpread.term_spread * 100;
+    spreadType = "term_spread";
+  } else if (latestSpread != null) {
+    // Single maturity — spread is 0 per Blockworks methodology
+    spreadValue = 0;
+    spreadType = "single_maturity";
+  }
 
   const curve = spreadValue !== null
-    ? interpretTermSpread(spreadValue, hasRealSpread)
+    ? interpretTermSpread(spreadValue, spreadType)
     : null;
 
   const tvl = data?.currentPendle ? data.currentPendle.totalTvl.usd : null;
@@ -595,9 +626,9 @@ export default function SUSDEDashboard() {
           style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap", opacity: animateIn ? 1 : 0 }}
         >
           <MetricCard
-            label={curve?.spreadType === "term_spread" ? "Term Spread" : "Curve Shape"}
+            label={curve?.spreadType === "single_maturity" ? "Curve Shape" : "Term Spread (7dMA)"}
             value={curve?.shape ?? "—"}
-            sub={curve ? `${curve.spreadType === "term_spread" ? "Spread" : "Premium"}: ${curve.spreadValue > 0 ? "+" : ""}${curve.spreadValue.toFixed(2)}%` : ""}
+            sub={curve ? `${curve.spreadType === "single_maturity" ? "Single maturity — no signal" : `Spread: ${curve.spreadValue > 0 ? "+" : ""}${curve.spreadValue.toFixed(2)}%`}` : ""}
             color={curve?.shapeColor ?? "#6e7681"}
             large
           />
@@ -768,7 +799,7 @@ export default function SUSDEDashboard() {
                         {curve.shape}
                       </div>
                       <span style={{ color: "#6e7681", fontSize: "0.6rem", fontFamily: "'JetBrains Mono', monospace" }}>
-                        {curve.spreadType === "term_spread" ? "Term Spread" : "Implied Premium"}: {curve.spreadValue > 0 ? "+" : ""}{curve.spreadValue.toFixed(2)}%
+                        {curve.spreadType === "term_spread_7dma" ? "7dMA Spread" : curve.spreadType === "term_spread" ? "Term Spread" : "Single Maturity"}: {curve.spreadValue > 0 ? "+" : ""}{curve.spreadValue.toFixed(2)}%
                       </span>
                     </div>
                     <div style={{ color: "#8b949e", fontSize: "0.65rem", lineHeight: 1.6 }}>
@@ -827,6 +858,7 @@ export default function SUSDEDashboard() {
                     fontFamily: "'JetBrains Mono', monospace", fontSize: "0.6rem", color: "#6e7681",
                   }}>
                     <div>term_spread = back_month_implied − front_month_implied</div>
+                    <div style={{ marginTop: 2 }}>regime_signal = 7-day moving average of term_spread</div>
                     <div style={{ marginTop: 4 }}>
                       <span style={{ color: "#00ff88" }}>contango</span> (spread {">"} 0) → bullish BTC
                       {" · "}
@@ -835,7 +867,7 @@ export default function SUSDEDashboard() {
                       <span style={{ color: "#ff5544" }}>backwardation</span> ({"<"} 0) → bearish BTC
                     </div>
                     <div style={{ marginTop: 4, color: "#484f58" }}>
-                      Methodology: Blockworks Research — term spread wins horserace vs underlying APY alone
+                      Methodology: Blockworks Research — 7dMA smoothed term spread · single maturity = 0 (no signal)
                     </div>
                     {spreadStats && (
                       <div style={{ marginTop: 4, color: "#484f58" }}>
@@ -1064,7 +1096,7 @@ export default function SUSDEDashboard() {
               <SectionHeader
                 icon="📊"
                 title="Historical Term Spread: Contango vs Backwardation"
-                subtitle="back_month_implied − front_month_implied · Above zero = contango (bullish) · Below = backwardation (bearish)"
+                subtitle="Bars = daily raw spread · Orange line = 7-day MA (Blockworks methodology) · Above zero = contango · Below = backwardation"
               />
               {data?.termSpreadsWithBtc.length ? (
                 <ResponsiveContainer width="100%" height={350}>
@@ -1073,6 +1105,7 @@ export default function SUSDEDashboard() {
                       date: r.date,
                       dateShort: r.date.slice(5),
                       spread: r.term_spread * 100,
+                      spread7dma: r.term_spread_7dma != null ? r.term_spread_7dma * 100 : null,
                       underlying: r.underlying_apy ? r.underlying_apy * 100 : null,
                     }))}
                     margin={{ top: 10, right: 20, bottom: 10, left: 0 }}
@@ -1096,18 +1129,23 @@ export default function SUSDEDashboard() {
                     <ReferenceLine y={HISTORICAL_MEAN_SPREAD} stroke="#a371f740" strokeDasharray="3 3"
                       label={{ value: `Mean: ${HISTORICAL_MEAN_SPREAD}%`, fill: "#a371f760", fontSize: 8, position: "insideBottomRight" }}
                     />
-                    <Bar dataKey="spread" name="Term Spread" unit="%" radius={[2, 2, 0, 0]}>
+                    <Bar dataKey="spread" name="Term Spread (raw)" unit="%" radius={[2, 2, 0, 0]}>
                       {data.termSpreadsWithBtc.map((r, i) => {
                         const s = r.term_spread * 100;
                         return (
                           <Cell
                             key={i}
                             fill={s > 0.5 ? "#00ff88" : s > -0.5 ? "#ffd866" : s > -5 ? "#ff9944" : "#ff5544"}
-                            fillOpacity={0.7}
+                            fillOpacity={0.5}
                           />
                         );
                       })}
                     </Bar>
+                    <Line
+                      type="monotone" dataKey="spread7dma"
+                      stroke="#ff9944" strokeWidth={2} dot={false}
+                      name="7-day MA" unit="%"
+                    />
                   </ComposedChart>
                 </ResponsiveContainer>
               ) : (
@@ -1146,8 +1184,8 @@ export default function SUSDEDashboard() {
             }}>
               <SectionHeader
                 icon="🔗"
-                title="Term Spread vs BTC Price"
-                subtitle="Term spread overlaid with BTC price · Tests the Blockworks thesis: contango → bullish BTC"
+                title="Term Spread (7dMA) vs BTC Price"
+                subtitle="7-day moving average of term spread overlaid with BTC price · Tests the Blockworks thesis: contango → bullish BTC"
               />
               {data?.termSpreadsWithBtc.length ? (
                 <ResponsiveContainer width="100%" height={350}>
@@ -1157,7 +1195,7 @@ export default function SUSDEDashboard() {
                       .map((r) => ({
                         date: r.date,
                         dateShort: r.date.slice(5),
-                        spread: r.term_spread * 100,
+                        spread7dma: r.term_spread_7dma != null ? r.term_spread_7dma * 100 : r.term_spread * 100,
                         btc: r.btc_price! / 1000,
                       }))}
                     margin={{ top: 10, right: 60, bottom: 10, left: 0 }}
@@ -1174,7 +1212,7 @@ export default function SUSDEDashboard() {
                       tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
                       axisLine={{ stroke: "#21262d" }}
                       unit="%"
-                      label={{ value: "Spread %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                      label={{ value: "Spread 7dMA %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
                     />
                     <YAxis
                       yAxisId="btc"
@@ -1186,9 +1224,9 @@ export default function SUSDEDashboard() {
                     <Tooltip content={<CustomTooltip />} />
                     <ReferenceLine yAxisId="spread" y={0} stroke="#6e768150" strokeDasharray="5 5" />
                     <Area
-                      yAxisId="spread" type="monotone" dataKey="spread"
+                      yAxisId="spread" type="monotone" dataKey="spread7dma"
                       fill="#388bfd10" stroke="#388bfd" strokeWidth={2}
-                      name="Term Spread" unit="%"
+                      name="Term Spread 7dMA" unit="%"
                     />
                     <Line
                       yAxisId="btc" type="monotone" dataKey="btc"
@@ -1490,7 +1528,7 @@ export default function SUSDEDashboard() {
                         ...r,
                         btc: r.btc_price ?? btcPriceMap.get(r.date) ?? null,
                       })).filter(r => r.btc != null);
-                      const result: { date: string; dateShort: string; spread: number; vol30d: number | null }[] = [];
+                      const result: { date: string; dateShort: string; spread7dma: number; vol30d: number | null }[] = [];
                       for (let i = 0; i < rows.length; i++) {
                         let vol: number | null = null;
                         if (i >= 30) {
@@ -1506,10 +1544,13 @@ export default function SUSDEDashboard() {
                             vol = Math.sqrt(variance * 365) * 100; // annualized
                           }
                         }
+                        const spread7dma = rows[i].term_spread_7dma != null
+                          ? rows[i].term_spread_7dma! * 100
+                          : rows[i].term_spread * 100;
                         result.push({
                           date: rows[i].date,
                           dateShort: rows[i].date.slice(5),
-                          spread: rows[i].term_spread * 100,
+                          spread7dma,
                           vol30d: vol,
                         });
                       }
@@ -1529,7 +1570,7 @@ export default function SUSDEDashboard() {
                       tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
                       axisLine={{ stroke: "#21262d" }}
                       unit="%"
-                      label={{ value: "Spread %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                      label={{ value: "Spread 7dMA %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
                     />
                     <YAxis
                       yAxisId="vol"
@@ -1542,9 +1583,9 @@ export default function SUSDEDashboard() {
                     <Tooltip content={<CustomTooltip />} />
                     <ReferenceLine yAxisId="spread" y={0} stroke="#6e768130" strokeDasharray="3 3" />
                     <Area
-                      yAxisId="spread" type="monotone" dataKey="spread"
+                      yAxisId="spread" type="monotone" dataKey="spread7dma"
                       fill="#388bfd10" stroke="#388bfd" strokeWidth={1.5}
-                      name="Term Spread" unit="%"
+                      name="Term Spread 7dMA" unit="%"
                     />
                     <Line
                       yAxisId="vol" type="monotone" dataKey="vol30d"

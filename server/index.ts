@@ -8,7 +8,7 @@ import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 import { db } from "./db.js";
-import { fullSync, ingestAllPendleMarkets, ingestEthenaYield, ingestBtcPrices, computeTermSpreads } from "./ingest.js";
+import { fullSync, ingestAllPendleMarkets, ingestEthenaYield, ingestBtcPrices, computeTermSpreads, compute7DayMA } from "./ingest.js";
 
 // Load .env for API keys
 try {
@@ -141,6 +141,7 @@ app.get("/api/term-spreads/with-btc", (req, res) => {
     SELECT
       ts.date,
       ts.term_spread,
+      ts.term_spread_7dma,
       ts.front_implied,
       ts.back_implied,
       ts.front_expiry,

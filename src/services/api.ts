@@ -41,6 +41,7 @@ export interface TermSpread {
   back_expiry: string;
   back_implied: number;
   term_spread: number;
+  term_spread_7dma: number | null;
   underlying_apy: number;
   num_maturities: number;
 }

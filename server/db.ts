@@ -46,16 +46,17 @@ db.exec(`
     PRIMARY KEY (date, market_addr)
   );
 
-  -- Computed daily term spread (requires ≥2 active maturities on same date)
+  -- Computed daily term spread (requires ≥2 active maturities, or 0 for single-maturity)
   CREATE TABLE IF NOT EXISTS term_spreads (
     date            TEXT NOT NULL,
     front_addr      TEXT NOT NULL,           -- nearest-expiry market
     front_expiry    TEXT NOT NULL,
     front_implied   REAL NOT NULL,
-    back_addr       TEXT NOT NULL,           -- furthest-expiry market
+    back_addr       TEXT NOT NULL,           -- furthest-expiry market (same as front if single)
     back_expiry     TEXT NOT NULL,
     back_implied    REAL NOT NULL,
     term_spread     REAL NOT NULL,           -- back_implied - front_implied (in decimal)
+    term_spread_7dma REAL,                   -- 7-day moving average of term_spread (Blockworks methodology)
     underlying_apy  REAL,                    -- underlying on that date
     num_maturities  INTEGER NOT NULL DEFAULT 2,
     PRIMARY KEY (date)
@@ -125,8 +126,8 @@ const upsertSnapshot = db.prepare(`
 `);
 
 const upsertTermSpread = db.prepare(`
-  INSERT INTO term_spreads (date, front_addr, front_expiry, front_implied, back_addr, back_expiry, back_implied, term_spread, underlying_apy, num_maturities)
-  VALUES (@date, @frontAddr, @frontExpiry, @frontImplied, @backAddr, @backExpiry, @backImplied, @termSpread, @underlyingApy, @numMaturities)
+  INSERT INTO term_spreads (date, front_addr, front_expiry, front_implied, back_addr, back_expiry, back_implied, term_spread, term_spread_7dma, underlying_apy, num_maturities)
+  VALUES (@date, @frontAddr, @frontExpiry, @frontImplied, @backAddr, @backExpiry, @backImplied, @termSpread, NULL, @underlyingApy, @numMaturities)
   ON CONFLICT(date) DO UPDATE SET
     front_addr = @frontAddr,
     front_expiry = @frontExpiry,
@@ -137,6 +138,10 @@ const upsertTermSpread = db.prepare(`
     term_spread = @termSpread,
     underlying_apy = @underlyingApy,
     num_maturities = @numMaturities
+`);
+
+const updateTermSpread7dma = db.prepare(`
+  UPDATE term_spreads SET term_spread_7dma = @termSpread7dma WHERE date = @date
 `);
 
 const upsertBtcPrice = db.prepare(`
@@ -170,6 +175,7 @@ export {
   upsertMarket,
   upsertSnapshot,
   upsertTermSpread,
+  updateTermSpread7dma,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,
