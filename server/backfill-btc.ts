@@ -37,9 +37,9 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-// CoinGecko Pro uses pro-api.coingecko.com with x-cg-pro-api-key header
+// CoinGecko Pro API endpoint + key header
 const CG_BASE = "https://pro-api.coingecko.com/api/v3";
-const CG_HEADERS = {
+const CG_HEADERS: Record<string, string> = {
   Accept: "application/json",
   "x-cg-pro-api-key": API_KEY,
 };
@@ -107,7 +107,7 @@ async function main() {
       "SELECT COUNT(*) as c FROM btc_prices WHERE date >= ? AND date <= ?"
     ).get(range.from, range.to) as { c: number };
 
-    if (existing.c > 60) {
+    if (existing.c > 85) {
       console.log(`Skipping ${range.from} → ${range.to} (already have ${existing.c} rows)`);
       continue;
     }

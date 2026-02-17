@@ -37,7 +37,7 @@ function loadEnv() {
 loadEnv();
 
 const CG_API_KEY = process.env.COINGECKO_API_KEY;
-// Use Pro API if key available, otherwise fall back to free
+// CoinGecko API: use Pro endpoint if key is available, free tier otherwise
 const CG_BASE = CG_API_KEY
   ? "https://pro-api.coingecko.com/api/v3"
   : "https://api.coingecko.com/api/v3";
@@ -369,8 +369,7 @@ export async function ingestBtcPrices() {
   }
 
   // 2. Backfill historical data to cover term spread period (2024-01-01 onwards)
-  //    With Pro key: /market_chart/range is available and supports long ranges.
-  //    Without Pro key: this will fail gracefully and skip.
+  //    Uses CoinGecko /market_chart/range endpoint (requires Demo or Pro key).
   const backfillRanges = [
     { from: "2024-01-01", to: "2024-04-01" },
     { from: "2024-04-01", to: "2024-07-01" },
@@ -381,18 +380,18 @@ export async function ingestBtcPrices() {
 
   for (const range of backfillRanges) {
     try {
-      // Check if we already have data for this range
+      // Check if we already have sufficient data for this range
       const existing = db.prepare(
         "SELECT COUNT(*) as c FROM btc_prices WHERE date >= ? AND date <= ?"
       ).get(range.from, range.to) as { c: number };
 
-      if (existing.c > 60) {
+      if (existing.c > 85) {
         console.log(`  Skipping ${range.from} → ${range.to} (already have ${existing.c} rows)`);
         continue;
       }
 
       const fromTs = Math.floor(new Date(range.from).getTime() / 1000);
-      const toTs = Math.floor(new Date(range.to).getTime() / 1000);
+      const toTs   = Math.floor(new Date(range.to).getTime() / 1000);
 
       console.log(`  Backfilling ${range.from} → ${range.to}...`);
       const resp = await fetchCoinGecko<{ prices: [number, number][] }>(

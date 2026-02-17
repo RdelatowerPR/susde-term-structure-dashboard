@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Area, AreaChart,
+  ResponsiveContainer, ReferenceLine, ReferenceArea, Area, AreaChart,
   BarChart, Bar, Cell, ScatterChart, Scatter, ComposedChart,
 } from "recharts";
 import {
@@ -453,6 +453,52 @@ export default function SUSDEDashboard() {
     return { mean, std, min: Math.min(...spreads), max: Math.max(...spreads), contango, flat, backwardation, total: spreads.length };
   }, [data?.termSpreadsWithBtc]);
 
+  // Regime ribbon: compute contiguous date bands by regime for the Signal Analysis chart
+  const regimeBands = useMemo(() => {
+    if (!data?.termSpreadsWithBtc.length) return [];
+
+    type Band = { x1: string; x2: string; fill: string };
+    const bands: Band[] = [];
+
+    function getRegime(pct: number): { key: string; fill: string } {
+      if (pct > 2)    return { key: "steep_contango",      fill: "#00ff8818" };
+      if (pct > 0.5)  return { key: "contango",            fill: "#66ffaa12" };
+      if (pct > -0.5) return { key: "flat",                fill: "#ffd86610" };
+      if (pct > -5)   return { key: "backwardation",       fill: "#ff994415" };
+      return                 { key: "steep_backwardation",  fill: "#ff554420" };
+    }
+
+    // Only include rows that have BTC price data (matching chart data filter)
+    const rows = data.termSpreadsWithBtc.filter(r =>
+      r.btc_price != null || btcPriceMap.has(r.date)
+    );
+
+    let curKey: string | null = null;
+    let curFill: string | null = null;
+    let x1: string | null = null;
+
+    for (let i = 0; i < rows.length; i++) {
+      const pct = (rows[i].term_spread_7dma != null
+        ? rows[i].term_spread_7dma!
+        : rows[i].term_spread) * 100;
+      const { key, fill } = getRegime(pct);
+      const ds = rows[i].date.slice(5); // "MM-DD"
+
+      if (key !== curKey) {
+        if (curKey !== null && x1 !== null) {
+          const prevDs = rows[i - 1].date.slice(5);
+          bands.push({ x1, x2: prevDs, fill: curFill! });
+        }
+        curKey = key; curFill = fill; x1 = ds;
+      }
+    }
+    // Close the last band
+    if (curKey !== null && x1 !== null && rows.length > 0) {
+      bands.push({ x1, x2: rows[rows.length - 1].date.slice(5), fill: curFill! });
+    }
+    return bands;
+  }, [data?.termSpreadsWithBtc, btcPriceMap]);
+
   const premiumColor = curve?.shapeColor ?? "#6e7681";
 
   const tabs = [
@@ -460,7 +506,7 @@ export default function SUSDEDashboard() {
     { key: "termstructure", label: "TERM STRUCTURE" },
     { key: "spread", label: "TERM SPREAD" },
     { key: "btc", label: "BTC CORRELATION" },
-    { key: "prediction", label: "VOL PREDICTION" },
+    { key: "prediction", label: "SIGNAL ANALYSIS" },
     { key: "decile", label: "DECILE ANALYSIS" },
   ];
 
@@ -1588,84 +1634,128 @@ export default function SUSDEDashboard() {
             }}>
               <SectionHeader
                 icon="🔮"
-                title="Term Spread as Volatility Predictor"
-                subtitle="Extreme spread values (contango or steep backwardation) predict heightened forward vol"
+                title="Term Spread Z-Score vs BTC Price"
+                subtitle="Z-scored spread (centered at historical mean) overlaid with BTC price · Background shows regime state"
               />
-              {data?.termSpreadsWithBtc.length ? (
-                <ResponsiveContainer width="100%" height={350}>
-                  <ComposedChart
-                    data={(() => {
-                      // Enrich term spread rows with BTC prices from the full map
-                      const rows = data.termSpreadsWithBtc.map(r => ({
-                        ...r,
-                        btc: r.btc_price ?? btcPriceMap.get(r.date) ?? null,
-                      })).filter(r => r.btc != null);
-                      const result: { date: string; dateShort: string; spread7dma: number; vol30d: number | null }[] = [];
-                      for (let i = 0; i < rows.length; i++) {
-                        let vol: number | null = null;
-                        if (i >= 30) {
-                          const returns: number[] = [];
-                          for (let j = i - 29; j <= i; j++) {
-                            if (rows[j].btc && rows[j - 1]?.btc) {
-                              returns.push(Math.log(rows[j].btc! / rows[j - 1].btc!));
-                            }
-                          }
-                          if (returns.length > 5) {
-                            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-                            const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
-                            vol = Math.sqrt(variance * 365) * 100; // annualized
-                          }
-                        }
-                        const spread7dma = rows[i].term_spread_7dma != null
-                          ? rows[i].term_spread_7dma! * 100
-                          : rows[i].term_spread * 100;
-                        result.push({
-                          date: rows[i].date,
-                          dateShort: rows[i].date.slice(5),
-                          spread7dma,
-                          vol30d: vol,
-                        });
-                      }
-                      return result;
-                    })()}
-                    margin={{ top: 10, right: 60, bottom: 10, left: 0 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
-                    <XAxis
-                      dataKey="dateShort"
-                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
-                      axisLine={{ stroke: "#21262d" }}
-                      interval={Math.max(1, Math.floor(data.termSpreadsWithBtc.length / 12))}
-                    />
-                    <YAxis
-                      yAxisId="spread"
-                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
-                      axisLine={{ stroke: "#21262d" }}
-                      unit="%"
-                      label={{ value: "Spread 7dMA %", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
-                    />
-                    <YAxis
-                      yAxisId="vol"
-                      orientation="right"
-                      tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
-                      axisLine={{ stroke: "#21262d" }}
-                      unit="%"
-                      label={{ value: "30d Vol %", angle: 90, position: "insideRight", fill: "#6e7681", fontSize: 10 }}
-                    />
-                    <Tooltip content={<CustomTooltip />} />
-                    <ReferenceLine yAxisId="spread" y={0} stroke="#6e768130" strokeDasharray="3 3" />
-                    <Area
-                      yAxisId="spread" type="monotone" dataKey="spread7dma"
-                      fill="#388bfd10" stroke="#388bfd" strokeWidth={1.5}
-                      name="Term Spread 7dMA" unit="%"
-                    />
-                    <Line
-                      yAxisId="vol" type="monotone" dataKey="vol30d"
-                      stroke="#f778ba" strokeWidth={2} dot={false}
-                      name="30d Realized Vol" unit="%"
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+              {data?.termSpreadsWithBtc.length && spreadStats ? (
+                <>
+                  <ResponsiveContainer width="100%" height={350}>
+                    <ComposedChart
+                      data={(() => {
+                        const { mean, std } = spreadStats;
+                        const safeStd = std > 0 ? std : 1;
+
+                        return data.termSpreadsWithBtc.map(r => {
+                          const rawSpreadPct = (r.term_spread_7dma != null
+                            ? r.term_spread_7dma
+                            : r.term_spread) * 100;
+                          const zScore = (rawSpreadPct - mean) / safeStd;
+                          const btc = r.btc_price ?? btcPriceMap.get(r.date) ?? null;
+                          const btcPriceK = btc != null ? btc / 1000 : null;
+
+                          return {
+                            date: r.date,
+                            dateShort: r.date.slice(5),
+                            zScore: Math.round(zScore * 100) / 100,
+                            btcPriceK,
+                          };
+                        }).filter(r => r.btcPriceK != null);
+                      })()}
+                      margin={{ top: 10, right: 60, bottom: 10, left: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+                      <XAxis
+                        dataKey="dateShort"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        interval={Math.max(1, Math.floor(data.termSpreadsWithBtc.length / 12))}
+                      />
+                      {/* Left Y-axis: Z-Score (centered at 0) */}
+                      <YAxis
+                        yAxisId="zscore"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        tickFormatter={(v: number) => `${v.toFixed(1)}σ`}
+                        label={{ value: "Spread Z-Score (σ)", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                      />
+                      {/* Right Y-axis: BTC Price in $k */}
+                      <YAxis
+                        yAxisId="btc"
+                        orientation="right"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        tickFormatter={(v: number) => `$${v.toFixed(0)}k`}
+                        label={{ value: "BTC Price ($k)", angle: 90, position: "insideRight", fill: "#ffd866", fontSize: 10 }}
+                      />
+
+                      {/* Regime ribbon: colored background bands */}
+                      {regimeBands.map((band, i) => (
+                        <ReferenceArea
+                          key={i}
+                          yAxisId="zscore"
+                          x1={band.x1}
+                          x2={band.x2}
+                          fill={band.fill}
+                          fillOpacity={1}
+                          strokeOpacity={0}
+                        />
+                      ))}
+
+                      {/* Reference lines for z-score */}
+                      <ReferenceLine
+                        yAxisId="zscore" y={0} stroke="#6e768140" strokeDasharray="4 4"
+                        label={{ value: "Mean", position: "insideTopLeft", fill: "#6e7681", fontSize: 9 }}
+                      />
+                      <ReferenceLine yAxisId="zscore" y={1}  stroke="#388bfd20" strokeDasharray="2 4" />
+                      <ReferenceLine yAxisId="zscore" y={-1} stroke="#ff554420" strokeDasharray="2 4" />
+                      <ReferenceLine yAxisId="zscore" y={2}  stroke="#388bfd15" strokeDasharray="2 4" />
+                      <ReferenceLine yAxisId="zscore" y={-2} stroke="#ff554415" strokeDasharray="2 4" />
+
+                      <Tooltip content={<CustomTooltip />} />
+
+                      {/* Z-Score Area (primary signal) */}
+                      <Area
+                        yAxisId="zscore" type="monotone" dataKey="zScore"
+                        fill="#388bfd08" stroke="#388bfd" strokeWidth={1.5}
+                        dot={false} name="Spread Z-Score" unit="σ"
+                      />
+
+                      {/* BTC Price line (what the signal predicts) */}
+                      <Line
+                        yAxisId="btc" type="monotone" dataKey="btcPriceK"
+                        stroke="#ffd866" strokeWidth={2} dot={false}
+                        name="BTC Price" unit="k"
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+
+                  {/* Regime ribbon legend */}
+                  <div style={{
+                    display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap",
+                    fontFamily: "'JetBrains Mono', monospace", fontSize: "0.58rem",
+                  }}>
+                    {[
+                      { color: "#00ff8860", label: "Steep Contango (>+2%)" },
+                      { color: "#66ffaa50", label: "Contango (+0.5% to +2%)" },
+                      { color: "#ffd86640", label: "Flat (±0.5%)" },
+                      { color: "#ff994450", label: "Backwardation (-0.5% to -5%)" },
+                      { color: "#ff554460", label: "Steep Backwardation (<-5%)" },
+                    ].map((item, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <div style={{
+                          width: 12, height: 12, background: item.color,
+                          borderRadius: 2, border: "1px solid #21262d30",
+                        }} />
+                        <span style={{ color: "#8b949e" }}>{item.label}</span>
+                      </div>
+                    ))}
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: "auto" }}>
+                      <span style={{ color: "#388bfd" }}>— Spread Z-Score</span>
+                      <span style={{ color: "#6e7681", marginLeft: 8 }}>|</span>
+                      <span style={{ color: "#ffd866", marginLeft: 8 }}>— BTC Price</span>
+                    </div>
+                  </div>
+                </>
               ) : (
                 <LoadingSpinner />
               )}
