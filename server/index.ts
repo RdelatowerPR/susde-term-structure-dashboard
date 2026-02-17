@@ -2,7 +2,7 @@
 // Serves term structure data from local SQLite to the React dashboard.
 // Also runs daily auto-sync via node-cron.
 
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import express from "express";
 import cors from "cors";
@@ -191,10 +191,22 @@ app.get("/api/ethena", (_req, res) => {
 });
 
 // GET /api/current — current live Pendle market data (proxied to avoid CORS)
+// Dynamically picks the active market with the latest expiry
 app.get("/api/current", async (_req, res) => {
   try {
+    const market = db.prepare(`
+      SELECT address, chain_id, expiry FROM markets
+      WHERE is_active = 1
+      ORDER BY expiry DESC
+      LIMIT 1
+    `).get() as { address: string; chain_id: number; expiry: string } | undefined;
+
+    if (!market) {
+      return res.status(404).json({ error: "No active markets found" });
+    }
+
     const r = await fetch(
-      "https://api-v2.pendle.finance/core/v2/1/markets/0x8dae8ece668cf80d348873f23d456448e8694883/data"
+      `https://api-v2.pendle.finance/core/v2/${market.chain_id}/markets/${market.address}/data`
     );
     const data = await r.json();
     res.json(data);
@@ -246,6 +258,19 @@ app.post("/api/sync", async (_req, res) => {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
+
+// ─── PRODUCTION STATIC FILES ────────────────────────────────────────────────
+// In production, serve the Vite-built frontend from dist/.
+// In dev, Vite's dev server handles this via proxy, so this block is a no-op.
+
+const distPath = resolve(import.meta.dirname ?? ".", "../dist");
+if (existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get("{*path}", (_req, res) => {
+    res.sendFile(resolve(distPath, "index.html"));
+  });
+  console.log(`Serving frontend from ${distPath}`);
+}
 
 // ─── DAILY CRON ─────────────────────────────────────────────────────────────
 // Runs every day at 06:00 UTC (after funding rate settlements)

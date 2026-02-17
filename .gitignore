@@ -35,3 +35,10 @@ data/*.db-shm
 # Environment
 .env
 .env.local
+
+# Claude Code
+.claude/
+
+# Temp/junk files
+nul
+tmp_spreads.json

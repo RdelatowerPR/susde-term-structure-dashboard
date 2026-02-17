@@ -9,6 +9,7 @@
     "seed": "tsx server/ingest.ts",
     "start": "concurrently \"npm run server\" \"npm run dev\"",
     "build": "tsc -b && vite build",
+    "prod": "NODE_ENV=production tsx server/index.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },

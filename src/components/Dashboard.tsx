@@ -15,7 +15,7 @@ const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Historical mean from Blockworks report: mean term spread ~ -2.63%
 const HISTORICAL_MEAN_SPREAD = -2.63;
-const _HISTORICAL_STD_SPREAD = 3.5; // approximate 1σ (kept for reference)
+// const HISTORICAL_STD_SPREAD = 3.5; // approximate 1σ (kept for reference)
 
 // ─── CURVE SHAPE & REGIME INTERPRETATION ────────────────────────────────────
 // Based on the Blockworks Research report: "Forecasting Market Regimes with the sUSDe Term Structure"
@@ -565,7 +565,7 @@ export default function SUSDEDashboard() {
               color: "#6e7681", fontSize: "0.6rem", marginTop: 4, marginLeft: 18,
               fontFamily: "'JetBrains Mono', monospace",
             }}>
-              Pendle V2 · Ethereum Mainnet · Ethena Delta-Neutral Basis · Multi-Maturity
+              Pendle V2 · Multi-Chain (Ethereum + Plasma) · Ethena Delta-Neutral Basis · Multi-Maturity
             </div>
             <div style={{
               color: "#484f58", fontSize: "0.55rem", marginTop: 2, marginLeft: 18,
@@ -1125,7 +1125,7 @@ export default function SUSDEDashboard() {
                 }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid #21262d" }}>
-                      {["Address", "Expiry", "Status", "First Seen", "Last Updated"].map(h => (
+                      {["Address", "Chain", "Expiry", "Status", "First Seen", "Last Updated"].map(h => (
                         <th key={h} style={{ color: "#6e7681", padding: "8px 12px", textAlign: "left", fontWeight: 500 }}>{h}</th>
                       ))}
                     </tr>
@@ -1134,6 +1134,7 @@ export default function SUSDEDashboard() {
                     {data?.markets.map((m, i) => (
                       <tr key={i} style={{ borderBottom: "1px solid #161b22" }}>
                         <td style={{ color: "#8b949e", padding: "6px 12px" }}>{m.address.slice(0, 10)}...{m.address.slice(-6)}</td>
+                        <td style={{ color: "#8b949e", padding: "6px 12px" }}>{m.chain_id === 1 ? "ETH" : "Plasma"}</td>
                         <td style={{ color: "#e6edf3", padding: "6px 12px" }}>{m.expiry}</td>
                         <td style={{ padding: "6px 12px" }}>
                           <span style={{
