@@ -161,6 +161,64 @@ export async function ingestPendleMarket(market: { address: string; expiry: stri
   }
 }
 
+// ─── AUTO-DISCOVERY OF NEW PENDLE sUSDe MARKETS ─────────────────────────────
+// Queries both Ethereum and Plasma chains for sUSDe markets.
+// Any new markets not in the hardcoded list are added to the in-memory array
+// so they get ingested in the current sync run.
+
+interface PendleMarketEntry {
+  address: string;
+  expiry: string;
+  pt: { address: string };
+  yt: { address: string };
+  underlyingAsset: { symbol: string };
+}
+
+export async function discoverNewMarkets() {
+  console.log("=== Discovering new sUSDe Pendle markets ===");
+  const chains = [
+    { chainId: 1, name: "Ethereum" },
+    { chainId: 9745, name: "Plasma" },
+  ];
+  const knownAddresses = new Set(SUSDE_MARKETS.map(m => m.address.toLowerCase()));
+  let discovered = 0;
+
+  for (const chain of chains) {
+    try {
+      const url = `${PENDLE_BASE}/v1/${chain.chainId}/markets?q=sUSDe&limit=100`;
+      console.log(`  Querying ${chain.name} (chain ${chain.chainId})...`);
+      const resp = await fetchJSON<{ results: PendleMarketEntry[] }>(url);
+      const markets = resp.results || [];
+      console.log(`    Found ${markets.length} sUSDe markets on ${chain.name}`);
+
+      for (const m of markets) {
+        if (!knownAddresses.has(m.address.toLowerCase())) {
+          // Extract expiry date from the API response
+          const expiry = m.expiry.split("T")[0]; // "2026-05-07T00:00:00.000Z" → "2026-05-07"
+          console.log(`    ✨ NEW: ${m.address} (exp: ${expiry}, chain: ${chain.name})`);
+          SUSDE_MARKETS.push({
+            address: m.address,
+            expiry,
+            ...(chain.chainId !== 1 ? { chainId: chain.chainId } : {}),
+          });
+          knownAddresses.add(m.address.toLowerCase());
+          discovered++;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    } catch (err) {
+      console.error(`  Error discovering on ${chain.name}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (discovered > 0) {
+    console.log(`  Discovered ${discovered} new market(s) — will ingest in this sync.`);
+  } else {
+    console.log("  No new markets found.");
+  }
+  return discovered;
+}
+
 export async function ingestAllPendleMarkets() {
   console.log("=== Ingesting Pendle sUSDe markets ===");
   let total = 0;
@@ -456,6 +514,7 @@ export async function fullSync() {
 
   const t0 = Date.now();
 
+  await discoverNewMarkets();
   await ingestAllPendleMarkets();
   await ingestDefiLlama();
   await ingestBtcPrices();
