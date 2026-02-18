@@ -148,6 +148,9 @@ app.get("/api/term-spreads/with-btc", (req, res) => {
       ts.back_expiry,
       ts.underlying_apy,
       ts.num_maturities,
+      ts.regime,
+      ts.btc_outlook,
+      ts.prob_positive_90d,
       bp.price as btc_price,
       da.apy as defillama_apy
     FROM term_spreads ts

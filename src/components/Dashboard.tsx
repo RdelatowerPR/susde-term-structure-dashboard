@@ -1724,11 +1724,11 @@ export default function SUSDEDashboard() {
               {spreadStats ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {[
-                    { label: "Steep Contango (>+2%)", pct: data!.termSpreadsWithBtc.filter(r => r.term_spread * 100 > 2).length / spreadStats.total * 100, color: "#00ff88" },
-                    { label: "Contango (+0.5% to +2%)", pct: data!.termSpreadsWithBtc.filter(r => r.term_spread * 100 > 0.5 && r.term_spread * 100 <= 2).length / spreadStats.total * 100, color: "#66ffaa" },
-                    { label: "Flat (±0.5%)", pct: spreadStats.flat / spreadStats.total * 100, color: "#ffd866" },
-                    { label: "Backwardation (-0.5% to -5%)", pct: data!.termSpreadsWithBtc.filter(r => r.term_spread * 100 >= -5 && r.term_spread * 100 < -0.5).length / spreadStats.total * 100, color: "#ff9944" },
-                    { label: "Steep Backwardation (<-5%)", pct: data!.termSpreadsWithBtc.filter(r => r.term_spread * 100 < -5).length / spreadStats.total * 100, color: "#ff5544" },
+                    { label: "Steep Contango (>+2%)", pct: data!.termSpreadsWithBtc.filter(r => r.regime === "STEEP_CONTANGO").length / spreadStats.total * 100, color: "#00ff88" },
+                    { label: "Contango (+0.5% to +2%)", pct: data!.termSpreadsWithBtc.filter(r => r.regime === "CONTANGO").length / spreadStats.total * 100, color: "#66ffaa" },
+                    { label: "Flat (±0.5%)", pct: data!.termSpreadsWithBtc.filter(r => r.regime === "FLAT").length / spreadStats.total * 100, color: "#ffd866" },
+                    { label: "Backwardation (-0.5% to -5%)", pct: data!.termSpreadsWithBtc.filter(r => r.regime === "BACKWARDATION").length / spreadStats.total * 100, color: "#ff9944" },
+                    { label: "Steep Backwardation (<-5%)", pct: data!.termSpreadsWithBtc.filter(r => r.regime === "STEEP_BACKWARDATION").length / spreadStats.total * 100, color: "#ff5544" },
                   ].map((item, i) => (
                     <div key={i}>
                       <div style={{

@@ -103,6 +103,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_spreads_date ON term_spreads(date);
 `);
 
+// ─── SCHEMA MIGRATIONS ──────────────────────────────────────────────────────
+// Add regime classification columns (idempotent — safe to re-run)
+for (const col of ["regime TEXT", "btc_outlook TEXT", "prob_positive_90d REAL"]) {
+  try {
+    db.exec(`ALTER TABLE term_spreads ADD COLUMN ${col}`);
+  } catch {
+    // Column already exists — no-op
+  }
+}
+
 // ─── PREPARED STATEMENTS ────────────────────────────────────────────────────
 
 const upsertMarket = db.prepare(`
@@ -144,6 +154,12 @@ const updateTermSpread7dma = db.prepare(`
   UPDATE term_spreads SET term_spread_7dma = @termSpread7dma WHERE date = @date
 `);
 
+const updateRegime = db.prepare(`
+  UPDATE term_spreads
+  SET regime = @regime, btc_outlook = @btcOutlook, prob_positive_90d = @probPositive90d
+  WHERE date = @date
+`);
+
 const upsertBtcPrice = db.prepare(`
   INSERT INTO btc_prices (date, price, change_24h)
   VALUES (@date, @price, @change24h)
@@ -176,6 +192,7 @@ export {
   upsertSnapshot,
   upsertTermSpread,
   updateTermSpread7dma,
+  updateRegime,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,

@@ -10,6 +10,7 @@ import {
   upsertSnapshot,
   upsertTermSpread,
   updateTermSpread7dma,
+  updateRegime,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,
@@ -362,6 +363,78 @@ export function compute7DayMA() {
   console.log(`  Updated ${updates.length} rows with 7-day MA.`);
 }
 
+// ─── REGIME CLASSIFICATION ──────────────────────────────────────────────────
+// Assigns a market regime label to each day based on the 7-day MA of term spread.
+// Thresholds match the Blockworks Research framework (see Dashboard.tsx interpretTermSpread).
+//   > +2%   → STEEP_CONTANGO   / STRONGLY_BULLISH
+//   +0.5–2% → CONTANGO         / BULLISH
+//   ±0.5%   → FLAT             / NEUTRAL
+//   -0.5–5% → BACKWARDATION    / MILDLY_BEARISH
+//   < -5%   → STEEP_BACKWARDATION / BEARISH
+//   single  → SINGLE_MATURITY  / NO_SIGNAL
+
+export function classifyRegimes() {
+  console.log("=== Classifying regimes ===");
+
+  const rows = db.prepare(`
+    SELECT date, term_spread, term_spread_7dma, num_maturities
+    FROM term_spreads ORDER BY date ASC
+  `).all() as {
+    date: string;
+    term_spread: number;
+    term_spread_7dma: number | null;
+    num_maturities: number;
+  }[];
+
+  if (rows.length === 0) {
+    console.log("  No term spreads to classify.");
+    return;
+  }
+
+  const updates: { date: string; regime: string; btcOutlook: string; probPositive90d: number }[] = [];
+
+  for (const row of rows) {
+    if (row.num_maturities === 1) {
+      updates.push({ date: row.date, regime: "SINGLE_MATURITY", btcOutlook: "NO_SIGNAL", probPositive90d: 50 });
+      continue;
+    }
+
+    // Use 7dMA if available, fall back to raw spread; convert decimal → percentage
+    const spreadPct = (row.term_spread_7dma != null ? row.term_spread_7dma : row.term_spread) * 100;
+
+    let regime: string;
+    let btcOutlook: string;
+    if (spreadPct > 2) {
+      regime = "STEEP_CONTANGO"; btcOutlook = "STRONGLY_BULLISH";
+    } else if (spreadPct > 0.5) {
+      regime = "CONTANGO"; btcOutlook = "BULLISH";
+    } else if (spreadPct > -0.5) {
+      regime = "FLAT"; btcOutlook = "NEUTRAL";
+    } else if (spreadPct > -5) {
+      regime = "BACKWARDATION"; btcOutlook = "MILDLY_BEARISH";
+    } else {
+      regime = "STEEP_BACKWARDATION"; btcOutlook = "BEARISH";
+    }
+
+    const probPositive90d = Math.round(Math.max(5, Math.min(95, 50 + spreadPct * 8)) * 10) / 10;
+
+    updates.push({ date: row.date, regime, btcOutlook, probPositive90d });
+  }
+
+  const updateMany = db.transaction((items: typeof updates) => {
+    for (const u of items) {
+      updateRegime.run(u);
+    }
+  });
+
+  updateMany(updates);
+
+  // Log distribution
+  const dist: Record<string, number> = {};
+  for (const u of updates) dist[u.regime] = (dist[u.regime] || 0) + 1;
+  console.log(`  Classified ${updates.length} rows:`, dist);
+}
+
 // ─── DEFILLAMA INGESTION ────────────────────────────────────────────────────
 
 export async function ingestDefiLlama() {
@@ -521,6 +594,7 @@ export async function fullSync() {
   await ingestEthenaYield();
   computeTermSpreads();
   compute7DayMA();
+  classifyRegimes();
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`\nSync complete in ${elapsed}s.`);

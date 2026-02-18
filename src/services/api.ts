@@ -44,6 +44,9 @@ export interface TermSpread {
   term_spread_7dma: number | null;
   underlying_apy: number;
   num_maturities: number;
+  regime: string | null;
+  btc_outlook: string | null;
+  prob_positive_90d: number | null;
 }
 
 export interface TermSpreadWithBtc extends TermSpread {
