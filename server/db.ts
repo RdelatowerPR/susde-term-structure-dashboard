@@ -105,7 +105,10 @@ db.exec(`
 
 // ─── SCHEMA MIGRATIONS ──────────────────────────────────────────────────────
 // Add regime classification columns (idempotent — safe to re-run)
-for (const col of ["regime TEXT", "btc_outlook TEXT", "prob_positive_90d REAL"]) {
+for (const col of [
+  "regime TEXT", "btc_outlook TEXT", "prob_positive_90d REAL",
+  "fwd_return_90d REAL", "fwd_max_return_90d REAL", "fwd_min_return_90d REAL", "fwd_skew_90d REAL",
+]) {
   try {
     db.exec(`ALTER TABLE term_spreads ADD COLUMN ${col}`);
   } catch {
@@ -160,6 +163,13 @@ const updateRegime = db.prepare(`
   WHERE date = @date
 `);
 
+const updateForwardSkew = db.prepare(`
+  UPDATE term_spreads
+  SET fwd_return_90d = @fwdReturn90d, fwd_max_return_90d = @fwdMaxReturn90d,
+      fwd_min_return_90d = @fwdMinReturn90d, fwd_skew_90d = @fwdSkew90d
+  WHERE date = @date
+`);
+
 const upsertBtcPrice = db.prepare(`
   INSERT INTO btc_prices (date, price, change_24h)
   VALUES (@date, @price, @change24h)
@@ -193,6 +203,7 @@ export {
   upsertTermSpread,
   updateTermSpread7dma,
   updateRegime,
+  updateForwardSkew,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,

@@ -151,6 +151,10 @@ app.get("/api/term-spreads/with-btc", (req, res) => {
       ts.regime,
       ts.btc_outlook,
       ts.prob_positive_90d,
+      ts.fwd_return_90d,
+      ts.fwd_max_return_90d,
+      ts.fwd_min_return_90d,
+      ts.fwd_skew_90d,
       bp.price as btc_price,
       da.apy as defillama_apy
     FROM term_spreads ts
