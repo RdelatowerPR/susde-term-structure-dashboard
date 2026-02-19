@@ -194,6 +194,11 @@ export async function discoverNewMarkets() {
       console.log(`    Found ${markets.length} sUSDe markets on ${chain.name}`);
 
       for (const m of markets) {
+        // Pendle's q=sUSDe search is fuzzy and matches srUSDe, jrUSDe, etc.
+        // Only accept markets whose underlying asset is exactly sUSDe.
+        if (m.underlyingAsset?.symbol !== "sUSDe") {
+          continue;
+        }
         if (!knownAddresses.has(m.address.toLowerCase())) {
           // Extract expiry date from the API response
           const expiry = m.expiry.split("T")[0]; // "2026-05-07T00:00:00.000Z" → "2026-05-07"
