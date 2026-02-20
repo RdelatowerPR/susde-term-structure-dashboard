@@ -156,7 +156,6 @@ function median(arr: number[]): number {
 
 function computeDeciles(
   spreadsWithBtc: TermSpreadWithBtc[],
-  btcPriceMap: Map<string, number>,
 ): DecileRow[] {
   if (spreadsWithBtc.length < 20) return [];
 
@@ -165,24 +164,6 @@ function computeDeciles(
   const decileSize = Math.floor(n / 10);
   const rows: DecileRow[] = [];
 
-  // Helper: find BTC price on or near a date (±3 days)
-  function findBtcPrice(dateStr: string): number | null {
-    const exact = btcPriceMap.get(dateStr);
-    if (exact != null) return exact;
-    // Try nearby dates (±1, ±2, ±3)
-    const d = new Date(dateStr);
-    for (let offset = 1; offset <= 3; offset++) {
-      for (const dir of [1, -1]) {
-        const nd = new Date(d);
-        nd.setDate(nd.getDate() + offset * dir);
-        const key = nd.toISOString().split("T")[0];
-        const price = btcPriceMap.get(key);
-        if (price != null) return price;
-      }
-    }
-    return null;
-  }
-
   for (let d = 0; d < 10; d++) {
     const start = d * decileSize;
     const end = d === 9 ? n : (d + 1) * decileSize;
@@ -190,24 +171,9 @@ function computeDeciles(
 
     const avgSpread = slice.reduce((s, r) => s + r.term_spread, 0) / slice.length;
 
-    // Compute avg 90d forward BTC return for this decile using the full BTC price map
-    let avgReturn: number | null = null;
-    const returns: number[] = [];
-    for (const row of slice) {
-      const currentPrice = row.btc_price ?? findBtcPrice(row.date);
-      if (currentPrice == null || currentPrice <= 0) continue;
-
-      const futureDate = new Date(row.date);
-      futureDate.setDate(futureDate.getDate() + 90);
-      const futureDateStr = futureDate.toISOString().split("T")[0];
-      const futurePrice = findBtcPrice(futureDateStr);
-      if (futurePrice != null) {
-        returns.push(((futurePrice - currentPrice) / currentPrice) * 100);
-      }
-    }
-    if (returns.length > 0) {
-      avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-    }
+    // Use server-computed forward return skew (Blockworks methodology: max return + min return over 90d)
+    const skews = slice.filter(r => r.fwd_skew_90d != null).map(r => r.fwd_skew_90d! * 100);
+    const avgReturn = skews.length > 0 ? skews.reduce((a, b) => a + b, 0) / skews.length : null;
 
     const hue = d * 12; // red→green
     rows.push({
@@ -216,7 +182,7 @@ function computeDeciles(
       count: slice.length,
       avgSpread: avgSpread * 100,
       avgBtcReturn90d: avgReturn,
-      medianBtcReturn90d: returns.length > 0 ? median(returns) : null,
+      medianBtcReturn90d: skews.length > 0 ? median(skews) : null,
       color: `hsl(${hue}, 70%, 55%)`,
     });
   }
@@ -437,8 +403,8 @@ export default function SUSDEDashboard() {
 
   // ── Computed analytics ──
   const deciles = useMemo(() =>
-    data?.termSpreadsWithBtc.length ? computeDeciles(data.termSpreadsWithBtc, btcPriceMap) : [],
-    [data?.termSpreadsWithBtc, btcPriceMap]
+    data?.termSpreadsWithBtc.length ? computeDeciles(data.termSpreadsWithBtc) : [],
+    [data?.termSpreadsWithBtc]
   );
 
   // Spread statistics
@@ -1482,6 +1448,105 @@ export default function SUSDEDashboard() {
               )}
             </div>
 
+            {/* Rolling BTC Forward Return Skew (90d) — Blockworks Chart 4 */}
+            <div style={{
+              background: "#161b22", border: "1px solid #21262d",
+              borderRadius: 8, padding: 20,
+            }}>
+              <SectionHeader
+                icon="📉"
+                title="Rolling BTC Forward Return Skew (90d)"
+                subtitle="Forward realized return skew over 90 days · Positive = more upside room · Negative = more downside risk"
+              />
+              {data?.termSpreadsWithBtc.length ? (
+                <>
+                  <ResponsiveContainer width="100%" height={380}>
+                    <ComposedChart
+                      data={(() => {
+                        const filtered = data.termSpreadsWithBtc.filter(r => r.fwd_skew_90d != null);
+                        const step = Math.max(1, Math.floor(filtered.length / 300));
+                        return filtered
+                          .filter((_, i) => i % step === 0)
+                          .map(r => ({
+                            date: r.date,
+                            dateShort: r.date.slice(0, 7),
+                            skew: r.fwd_skew_90d! * 100,
+                            spread7dma: r.term_spread_7dma != null ? r.term_spread_7dma * 100 : null,
+                          }));
+                      })()}
+                      margin={{ top: 10, right: 60, bottom: 10, left: 0 }}
+                    >
+                      <defs>
+                        <linearGradient id="skewGradientPos" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#00ff88" stopOpacity={0.35} />
+                          <stop offset="100%" stopColor="#00ff88" stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="skewGradientNeg" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#ff5544" stopOpacity={0.02} />
+                          <stop offset="100%" stopColor="#ff5544" stopOpacity={0.35} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+                      <XAxis
+                        dataKey="dateShort"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        interval={15}
+                      />
+                      <YAxis
+                        yAxisId="skew"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        unit="%"
+                        label={{ value: "Forward Return Skew (%)", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                      />
+                      <YAxis
+                        yAxisId="spread"
+                        orientation="right"
+                        tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
+                        axisLine={{ stroke: "#21262d" }}
+                        unit="%"
+                      />
+                      <Tooltip content={<CustomTooltip />} />
+                      <ReferenceLine yAxisId="skew" y={0} stroke="#6e7681" strokeDasharray="5 5" />
+                      <Area
+                        yAxisId="skew" type="monotone" dataKey="skew"
+                        stroke="#a371f7" strokeWidth={2} dot={false}
+                        fill="url(#skewGradientPos)"
+                        name="Forward Return Skew" unit="%"
+                      />
+                      <Line
+                        yAxisId="spread" type="monotone" dataKey="spread7dma"
+                        stroke="#388bfd" strokeWidth={1.5} dot={false}
+                        strokeDasharray="4 4"
+                        name="Term Spread 7dMA" unit="%"
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+
+                  <div style={{
+                    display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap",
+                    fontFamily: "'JetBrains Mono', monospace", fontSize: "0.55rem",
+                  }}>
+                    <span><span style={{ color: "#a371f7" }}>--</span> Forward Return Skew (90d)</span>
+                    <span style={{ color: "#6e7681" }}>|</span>
+                    <span><span style={{ color: "#388bfd" }}>--</span> Term Spread 7dMA (overlay)</span>
+                  </div>
+
+                  <div style={{
+                    color: "#6e7681", fontSize: "0.6rem",
+                    fontFamily: "'JetBrains Mono', monospace", marginTop: 8,
+                  }}>
+                    Forward return skew = max return + min return over 90 days.
+                    Positive skew = more upside room than downside risk.
+                    The dashed blue overlay shows the term spread signal that precedes the skew movement.
+                  </div>
+                </>
+              ) : (
+                <LoadingSpinner />
+              )}
+            </div>
+
             {/* Scatter: Term Spread vs forward BTC returns */}
             <div style={{
               background: "#161b22", border: "1px solid #21262d",
@@ -1489,8 +1554,8 @@ export default function SUSDEDashboard() {
             }}>
               <SectionHeader
                 icon="🎯"
-                title="Term Spread vs Forward BTC Return (90d)"
-                subtitle="Each dot = one day · X = term spread, Y = subsequent 90-day BTC return"
+                title="Term Spread vs Forward Return Skew (90d)"
+                subtitle="Each dot = one day · X = term spread, Y = forward return skew (max + min return over 90d)"
               />
               {data?.termSpreadsWithBtc.length ? (
                 <ResponsiveContainer width="100%" height={350}>
@@ -1503,51 +1568,21 @@ export default function SUSDEDashboard() {
                       label={{ value: "Term Spread (%)", position: "insideBottom", offset: -10, fill: "#6e7681", fontSize: 10 }}
                     />
                     <YAxis
-                      type="number" dataKey="fwdReturn" name="90d BTC Return"
+                      type="number" dataKey="fwdReturn" name="Forward Return Skew"
                       tick={{ fill: "#6e7681", fontSize: 10, fontFamily: "'JetBrains Mono'" }}
                       axisLine={{ stroke: "#21262d" }} unit="%"
-                      label={{ value: "90d BTC Return (%)", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
+                      label={{ value: "Forward Return Skew (%)", angle: -90, position: "insideLeft", fill: "#6e7681", fontSize: 10 }}
                     />
                     <Tooltip content={<CustomTooltip />} />
                     <ReferenceLine x={0} stroke="#6e768130" strokeDasharray="3 3" />
                     <ReferenceLine y={0} stroke="#6e768130" strokeDasharray="3 3" />
                     <Scatter
-                      data={(() => {
-                        // Helper: find BTC price on or near a date (±3 days) from the full map
-                        function findPrice(dateStr: string): number | null {
-                          const exact = btcPriceMap.get(dateStr);
-                          if (exact != null) return exact;
-                          const d = new Date(dateStr);
-                          for (let off = 1; off <= 3; off++) {
-                            for (const dir of [1, -1]) {
-                              const nd = new Date(d);
-                              nd.setDate(nd.getDate() + off * dir);
-                              const p = btcPriceMap.get(nd.toISOString().split("T")[0]);
-                              if (p != null) return p;
-                            }
-                          }
-                          return null;
-                        }
-
-                        const points: { spread: number; fwdReturn: number }[] = [];
-                        const rows = data.termSpreadsWithBtc;
-                        for (let i = 0; i < rows.length; i++) {
-                          const currentPrice = rows[i].btc_price ?? findPrice(rows[i].date);
-                          if (currentPrice == null || currentPrice <= 0) continue;
-                          // Find BTC price ~90 days later from the full price map
-                          const target = new Date(rows[i].date);
-                          target.setDate(target.getDate() + 90);
-                          const targetStr = target.toISOString().split("T")[0];
-                          const futurePrice = findPrice(targetStr);
-                          if (futurePrice != null) {
-                            points.push({
-                              spread: rows[i].term_spread * 100,
-                              fwdReturn: ((futurePrice - currentPrice) / currentPrice) * 100,
-                            });
-                          }
-                        }
-                        return points;
-                      })()}
+                      data={data.termSpreadsWithBtc
+                        .filter(r => r.fwd_skew_90d != null)
+                        .map(r => ({
+                          spread: r.term_spread * 100,
+                          fwdReturn: r.fwd_skew_90d! * 100,
+                        }))}
                       fill="#388bfd" fillOpacity={0.5} r={4}
                     />
                   </ScatterChart>
@@ -1568,9 +1603,9 @@ export default function SUSDEDashboard() {
                   fontFamily: "'JetBrains Mono', monospace",
                 }}>
                   The Blockworks report found that contango in the sUSDe term structure
-                  (positive term spread) preceded positive 90-day BTC returns 80%+ of the time.
-                  Steep backwardation (spread {"<"} -7.5%) preceded exclusively negative returns.
-                  The scatter above tests this relationship with our local database.
+                  (positive term spread) preceded positive 90-day forward return skew 80%+ of the time.
+                  Steep backwardation (spread {"<"} -7.5%) preceded exclusively negative skew.
+                  Forward return skew = return to max + return to min over 90d (positive = more upside room).
                 </div>
               </div>
             </div>
@@ -1979,38 +2014,13 @@ export default function SUSDEDashboard() {
                       ];
 
                       // Helper: find BTC price
-                      function findPrice(dateStr: string): number | null {
-                        const exact = btcPriceMap.get(dateStr);
-                        if (exact != null) return exact;
-                        const d = new Date(dateStr);
-                        for (let off = 1; off <= 3; off++) {
-                          for (const dir of [1, -1]) {
-                            const nd = new Date(d);
-                            nd.setDate(nd.getDate() + off * dir);
-                            const p = btcPriceMap.get(nd.toISOString().split("T")[0]);
-                            if (p != null) return p;
-                          }
-                        }
-                        return null;
-                      }
-
                       return bucketDefs.map(b => {
                         const rows = data.termSpreadsWithBtc.filter(r => {
                           const s = r.term_spread * 100;
                           return s >= b.min && s < b.max;
                         });
-                        const returns: number[] = [];
-                        for (const row of rows) {
-                          const currentPrice = row.btc_price ?? findPrice(row.date);
-                          if (currentPrice == null || currentPrice <= 0) continue;
-                          const futD = new Date(row.date);
-                          futD.setDate(futD.getDate() + 90);
-                          const futPrice = findPrice(futD.toISOString().split("T")[0]);
-                          if (futPrice != null) {
-                            returns.push(((futPrice - currentPrice) / currentPrice) * 100);
-                          }
-                        }
-                        const meanRet = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : null;
+                        const skews = rows.filter(r => r.fwd_skew_90d != null).map(r => r.fwd_skew_90d! * 100);
+                        const meanRet = skews.length > 0 ? skews.reduce((a, b) => a + b, 0) / skews.length : null;
                         return { bucket: b.label, meanReturn: meanRet, count: rows.length };
                       }).filter(b => b.count > 0);
                     })()}

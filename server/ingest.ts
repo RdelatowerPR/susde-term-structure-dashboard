@@ -11,6 +11,7 @@ import {
   upsertTermSpread,
   updateTermSpread7dma,
   updateRegime,
+  updateForwardSkew,
   upsertBtcPrice,
   upsertEthenaYield,
   upsertDefiLlamaApy,
@@ -55,7 +56,6 @@ const SUSDE_MARKETS: { address: string; expiry: string; chainId?: number }[] = [
   // 2024 maturities (Ethereum)
   { address: "0x8f7627bd46b30e296aa3aabe1df9bfac10920b6e", expiry: "2024-04-25" },
   { address: "0x107a2e3cd2bb9a32b9ee2e4d51143149f8367eba", expiry: "2024-07-25" },
-  { address: "0x93a82f3873e5b4ff81902663c43286d662f6721c", expiry: "2024-09-26" },
   { address: "0xd1d7d99764f8a52aff007b7831cc02748b2013b5", expiry: "2024-09-26" },
   { address: "0xbbf399db59a845066aafce9ae55e68c505fa97b7", expiry: "2024-10-24" },
   { address: "0xa0ab94debb3cc9a7ea77f3205ba4ab23276fed08", expiry: "2024-12-26" },
@@ -70,6 +70,7 @@ const SUSDE_MARKETS: { address: string; expiry: string; chainId?: number }[] = [
   { address: "0xed81f8ba2941c3979de2265c295748a6b6956567", expiry: "2026-02-05" },
   { address: "0x8dae8ece668cf80d348873f23d456448e8694883", expiry: "2026-05-07" },
   // 2026 maturities (Plasma, chain 9745)
+  { address: "0xe06c3b972ba630ccf3392cecdbe070690b4e6b55", expiry: "2026-01-15", chainId: 9745 },
   { address: "0x5fa69163085efd4767f24639eb1fb87ed34bbb12", expiry: "2026-04-09", chainId: 9745 },
 ];
 
@@ -193,6 +194,11 @@ export async function discoverNewMarkets() {
       console.log(`    Found ${markets.length} sUSDe markets on ${chain.name}`);
 
       for (const m of markets) {
+        // Pendle's q=sUSDe search is fuzzy and matches srUSDe, jrUSDe, etc.
+        // Only accept markets whose underlying asset is exactly sUSDe.
+        if (m.underlyingAsset?.symbol !== "sUSDe") {
+          continue;
+        }
         if (!knownAddresses.has(m.address.toLowerCase())) {
           // Extract expiry date from the API response
           const expiry = m.expiry.split("T")[0]; // "2026-05-07T00:00:00.000Z" → "2026-05-07"
@@ -435,6 +441,114 @@ export function classifyRegimes() {
   console.log(`  Classified ${updates.length} rows:`, dist);
 }
 
+// ─── FORWARD RETURN SKEW ────────────────────────────────────────────────────
+// Blockworks methodology: for each date, compute the forward return skew over
+// the next 90 days. Skew = return_to_max + return_to_min, capturing the
+// asymmetry between upside and downside price movement (not just endpoint return).
+// Positive skew = more upside room, negative = more downside risk.
+
+export function computeForwardSkew() {
+  console.log("=== Computing forward return skew (90d) ===");
+
+  const rows = db.prepare(`
+    SELECT ts.date, bp.price as btc_price
+    FROM term_spreads ts
+    INNER JOIN btc_prices bp ON ts.date = bp.date
+    ORDER BY ts.date ASC
+  `).all() as { date: string; btc_price: number }[];
+
+  if (rows.length === 0) {
+    console.log("  No term spread dates with BTC prices found.");
+    return;
+  }
+
+  // Get latest BTC price date for window completeness check
+  const latestBtcDate = (db.prepare(
+    "SELECT MAX(date) as d FROM btc_prices"
+  ).get() as { d: string }).d;
+
+  // Build sorted array of all BTC prices for efficient window lookups
+  const allBtcPrices = db.prepare(
+    "SELECT date, price FROM btc_prices ORDER BY date ASC"
+  ).all() as { date: string; price: number }[];
+
+  // Map for endpoint lookups
+  const btcPriceMap = new Map<string, number>();
+  for (const bp of allBtcPrices) btcPriceMap.set(bp.date, bp.price);
+
+  const WINDOW_DAYS = 90;
+  type SkewRow = { date: string; fwdReturn90d: number | null; fwdMaxReturn90d: number | null; fwdMinReturn90d: number | null; fwdSkew90d: number | null };
+  const updates: SkewRow[] = [];
+  let computed = 0;
+  let skipped = 0;
+
+  for (const row of rows) {
+    const currentPrice = row.btc_price;
+    const currentDate = new Date(row.date + "T00:00:00Z");
+    const windowEnd = new Date(currentDate);
+    windowEnd.setUTCDate(windowEnd.getUTCDate() + WINDOW_DAYS);
+    const windowEndStr = windowEnd.toISOString().split("T")[0];
+
+    // Incomplete window — set NULL
+    if (windowEndStr > latestBtcDate) {
+      updates.push({ date: row.date, fwdReturn90d: null, fwdMaxReturn90d: null, fwdMinReturn90d: null, fwdSkew90d: null });
+      skipped++;
+      continue;
+    }
+
+    // Collect BTC prices in [date+1, date+90]
+    const nextDay = new Date(currentDate);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    const nextDayStr = nextDay.toISOString().split("T")[0];
+
+    const windowPrices: number[] = [];
+    for (const bp of allBtcPrices) {
+      if (bp.date < nextDayStr) continue;
+      if (bp.date > windowEndStr) break;
+      windowPrices.push(bp.price);
+    }
+
+    // Too few data points — unreliable
+    if (windowPrices.length < 5) {
+      updates.push({ date: row.date, fwdReturn90d: null, fwdMaxReturn90d: null, fwdMinReturn90d: null, fwdSkew90d: null });
+      skipped++;
+      continue;
+    }
+
+    const maxPrice = Math.max(...windowPrices);
+    const minPrice = Math.min(...windowPrices);
+
+    // Simple endpoint return (price at exactly t+90, or closest ±3 days)
+    let endPrice: number | undefined;
+    endPrice = btcPriceMap.get(windowEndStr);
+    if (endPrice == null) {
+      for (let off = 1; off <= 3 && endPrice == null; off++) {
+        for (const dir of [1, -1]) {
+          const tryDate = new Date(windowEnd);
+          tryDate.setUTCDate(tryDate.getUTCDate() + off * dir);
+          endPrice = btcPriceMap.get(tryDate.toISOString().split("T")[0]);
+          if (endPrice != null) break;
+        }
+      }
+    }
+
+    const fwdReturn90d = endPrice != null ? (endPrice - currentPrice) / currentPrice : null;
+    const fwdMaxReturn90d = (maxPrice - currentPrice) / currentPrice;
+    const fwdMinReturn90d = (minPrice - currentPrice) / currentPrice;
+    const fwdSkew90d = fwdMaxReturn90d + fwdMinReturn90d;
+
+    updates.push({ date: row.date, fwdReturn90d, fwdMaxReturn90d, fwdMinReturn90d, fwdSkew90d });
+    computed++;
+  }
+
+  const updateMany = db.transaction((items: SkewRow[]) => {
+    for (const u of items) updateForwardSkew.run(u);
+  });
+  updateMany(updates);
+
+  console.log(`  Forward skew: ${computed} computed, ${skipped} skipped (incomplete window).`);
+}
+
 // ─── DEFILLAMA INGESTION ────────────────────────────────────────────────────
 
 export async function ingestDefiLlama() {
@@ -595,6 +709,7 @@ export async function fullSync() {
   computeTermSpreads();
   compute7DayMA();
   classifyRegimes();
+  computeForwardSkew();
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`\nSync complete in ${elapsed}s.`);

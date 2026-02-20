@@ -47,6 +47,10 @@ export interface TermSpread {
   regime: string | null;
   btc_outlook: string | null;
   prob_positive_90d: number | null;
+  fwd_return_90d: number | null;
+  fwd_max_return_90d: number | null;
+  fwd_min_return_90d: number | null;
+  fwd_skew_90d: number | null;
 }
 
 export interface TermSpreadWithBtc extends TermSpread {
