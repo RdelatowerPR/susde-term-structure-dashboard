@@ -537,7 +537,9 @@ export default function SUSDEDashboard() {
               color: "#484f58", fontSize: "0.55rem", marginTop: 2, marginLeft: 18,
               fontFamily: "'JetBrains Mono', monospace",
             }}>
-              Last updated: {data?.lastUpdated.toLocaleTimeString() ?? "—"}
+              Last updated: {data?.stats?.lastSync?.[0]?.run_at
+                ? new Date(data.stats.lastSync[0].run_at + "Z").toLocaleString()
+                : "—"}
               {" · "}Auto-refresh: daily
               {data?.stats?.dateRange ? ` · Data: ${data.stats.dateRange.earliest} → ${data.stats.dateRange.latest}` : ""}
             </div>
