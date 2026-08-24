@@ -4,6 +4,9 @@ A full-stack dashboard for monitoring the **sUSDe yield term structure** on Pend
 
 **Live:** [susde.raulantonio.xyz](https://susde.raulantonio.xyz)
 
+**Operators and coding agents:** read `AGENTS.md` before changing runtime, security, deployment,
+or data behavior. `CLAUDE.md` imports that same authority for Claude Code.
+
 ## What This Does
 
 Ethena's sUSDe token captures yield from a delta-neutral basis trade (long spot BTC/ETH + short perpetual futures). Pendle V2 splits sUSDe into Principal Tokens (PT) and Yield Tokens (YT) at various maturities, creating a forward yield curve. The **term spread** (back-month implied yield minus front-month implied yield) acts as a leading indicator for BTC price regimes:
@@ -27,7 +30,7 @@ This dashboard collects daily snapshots from every sUSDe Pendle market across Et
                          | HTTP (proxied in dev)
 +------------------------v------------------------+
 |              Express API Server                  |
-|              (port 3001)                         |
+|       (loopback only: 127.0.0.1:3001)            |
 |                                                  |
 |  Routes: /api/term-structure                     |
 |          /api/term-spreads/with-btc              |
@@ -35,7 +38,7 @@ This dashboard collects daily snapshots from every sUSDe Pendle market across Et
 |          /api/btc-prices, /api/defillama         |
 |          /api/ethena, /api/current               |
 |          /api/btc-current, /api/stats            |
-|          POST /api/sync                          |
+|          POST /api/sync (local admin only)       |
 |                                                  |
 |  Cron: daily sync at 06:00 UTC                   |
 |  Auto-discovery: new Pendle markets              |
@@ -84,7 +87,7 @@ npm start
 
 The dashboard will be available at **http://localhost:5173**.
 
-### Production Deployment
+### Standalone production command (macOS/Linux)
 
 ```bash
 # Build the frontend
@@ -93,6 +96,9 @@ npm run build
 # Start production server (serves API + frontend on port 3001)
 npm run prod
 ```
+
+`npm run prod` uses POSIX environment-variable syntax and is not the Windows service command. The
+current Windows runtime is documented below and is owned by `dashboards-control`.
 
 ### Available Scripts
 
@@ -105,47 +111,22 @@ npm run prod
 | `npm run build` | `tsc -b && vite build` | TypeScript check + production build |
 | `npm run prod` | `NODE_ENV=production tsx server/index.ts` | Production server (serves built frontend + API) |
 
-## Deployment (Raspberry Pi)
+## Current Windows deployment
 
-The dashboard is hosted on a Raspberry Pi behind a Cloudflare Tunnel.
+The canonical Windows checkout is reached through `C:\Users\radr1\Systems\susde-dashboard`.
+The shared supervisor in `..\dashboards-control` starts the production server with
+`node --import tsx server/index.ts`, binds it only to `127.0.0.1:3001`, and supervises it through
+the `CryptoDashboards` scheduled task at logon and hourly. Do not widen the bind to `0.0.0.0` or
+`::`.
 
-### systemd Services
+The automatic `cloudflared` Windows service is the only public path and maps
+`susde.raulantonio.xyz` to the loopback origin. Its shared configuration is under
+`C:\ProgramData\cloudflared`; do not copy tunnel credentials into this repository or diagnostic
+output. The retired Raspberry Pi/systemd files are historical reference, not the active runtime.
 
-Two systemd services keep everything running:
-
-| Service | Purpose |
-|---------|---------|
-| `susde-dashboard.service` | Runs the Node.js production server (`node --import tsx server/index.ts`) |
-| `cloudflared-susde.service` | Runs the Cloudflare Tunnel connecting to `susde.raulantonio.xyz` |
-
-Both services are configured with:
-- `Restart=always` — auto-restart on crash
-- `systemctl enable` — auto-start on boot
-
-### Cloudflare Tunnel Config
-
-The tunnel uses `protocol: http2` (QUIC fails on Pi due to small UDP buffer size). Config lives at `~/.cloudflared/susde-config.yml`:
-
-```yaml
-tunnel: <tunnel-uuid>
-credentials-file: /home/raulantonio/.cloudflared/<tunnel-uuid>.json
-protocol: http2
-
-ingress:
-  - hostname: susde.raulantonio.xyz
-    service: http://localhost:3001
-  - service: http_status:404
-```
-
-### Updating the Dashboard
-
-```bash
-ssh pi
-cd ~/susde-term-structure-dashboard
-git pull
-npm run build
-sudo systemctl restart susde-dashboard
-```
+For exact status, restart, log, LAN-refusal, tunnel, and scheduled-task checks, use
+`..\dashboards-control\OPERATIONS.md`. Restart only this dashboard after a verified build; do not
+bounce all services for a single-project change.
 
 ## The Database
 
@@ -195,9 +176,12 @@ The database auto-updates daily at 06:00 UTC when the server is running. You can
 # Via the seed script (runs standalone, then exits)
 npm run seed
 
-# Via the API (while the server is running)
-curl -X POST http://localhost:3001/api/sync
+# Via the operator API from this host only
+curl -X POST -H "X-Local-Admin: 1" http://127.0.0.1:3001/api/sync
 ```
+
+The operator route rejects proxied, public, LAN, and unmarked requests. It is not a public API and
+must remain same-origin hidden behind the direct-loopback plus `X-Local-Admin: 1` check.
 
 To **completely rebuild** the database from scratch, delete the file and re-seed:
 
@@ -253,7 +237,7 @@ All endpoints are served from the Express server on port 3001 (proxied via Vite 
 | GET | `/api/current` | Live Pendle market data (proxied from Pendle API) |
 | GET | `/api/btc-current` | Live BTC price (proxied from CoinGecko) |
 | GET | `/api/stats` | Database statistics and last sync info |
-| POST | `/api/sync` | Trigger a manual full data sync |
+| POST | `/api/sync` | Trigger a full sync from direct loopback with `X-Local-Admin: 1` |
 
 ## Data Sources
 
@@ -296,7 +280,7 @@ susde-term-structure-dashboard/
 - **Frontend**: React 19, TypeScript, Recharts 3, Vite 7
 - **Backend**: Express 5, better-sqlite3, node-cron, tsx
 - **Database**: SQLite (local file, WAL mode for concurrent reads)
-- **Hosting**: Raspberry Pi + Cloudflare Tunnel
+- **Hosting**: loopback-only Windows service + Cloudflare Tunnel
 - **Styling**: Inline styles, Space Grotesk + JetBrains Mono fonts, dark terminal aesthetic
 
 ## Methodology Reference
