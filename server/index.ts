@@ -5,10 +5,14 @@
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
 import express from "express";
-import cors from "cors";
 import cron from "node-cron";
 import { db } from "./db.js";
-import { fullSync, ingestAllPendleMarkets, ingestEthenaYield, ingestBtcPrices, computeTermSpreads, compute7DayMA } from "./ingest.js";
+import { fullSync } from "./ingest.js";
+import {
+  PUBLIC_CACHE_CONTROL,
+  installPublicSecurity,
+  isTrustedLocalAdminRequest,
+} from "./security.js";
 
 // Load .env for API keys
 try {
@@ -32,9 +36,14 @@ if (CG_API_KEY) CG_HEADERS["x-cg-pro-api-key"] = CG_API_KEY;
 
 const app = express();
 const PORT = 3001;
+const PUBLIC_ORIGIN = "https://susde.raulantonio.xyz";
 
-app.use(cors());
+installPublicSecurity(app, PUBLIC_ORIGIN);
 app.use(express.json());
+
+function stringQueryParam(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
 
 // ─── API ROUTES ─────────────────────────────────────────────────────────────
 
@@ -49,9 +58,11 @@ app.get("/api/markets", (_req, res) => {
 
 // GET /api/snapshots — daily snapshots (optionally filtered by market or date range)
 app.get("/api/snapshots", (req, res) => {
-  const { market, from, to } = req.query;
+  const market = stringQueryParam(req.query.market);
+  const from = stringQueryParam(req.query.from);
+  const to = stringQueryParam(req.query.to);
   let sql = "SELECT * FROM daily_snapshots WHERE 1=1";
-  const params: any[] = [];
+  const params: string[] = [];
   if (market) { sql += " AND market_addr = ?"; params.push(market); }
   if (from) { sql += " AND date >= ?"; params.push(from); }
   if (to) { sql += " AND date <= ?"; params.push(to); }
@@ -125,9 +136,10 @@ app.get("/api/term-structure/history", (_req, res) => {
 
 // GET /api/term-spreads — historical term spread time series
 app.get("/api/term-spreads", (req, res) => {
-  const { from, to } = req.query;
+  const from = stringQueryParam(req.query.from);
+  const to = stringQueryParam(req.query.to);
   let sql = "SELECT * FROM term_spreads WHERE 1=1";
-  const params: any[] = [];
+  const params: string[] = [];
   if (from) { sql += " AND date >= ?"; params.push(from); }
   if (to) { sql += " AND date <= ?"; params.push(to); }
   sql += " ORDER BY date ASC";
@@ -136,7 +148,8 @@ app.get("/api/term-spreads", (req, res) => {
 
 // GET /api/term-spreads/with-btc — term spread + BTC price joined
 app.get("/api/term-spreads/with-btc", (req, res) => {
-  const { from, to } = req.query;
+  const from = stringQueryParam(req.query.from);
+  const to = stringQueryParam(req.query.to);
   let sql = `
     SELECT
       ts.date,
@@ -162,7 +175,7 @@ app.get("/api/term-spreads/with-btc", (req, res) => {
     LEFT JOIN defillama_apy da ON ts.date = da.date
     WHERE 1=1
   `;
-  const params: any[] = [];
+  const params: string[] = [];
   if (from) { sql += " AND ts.date >= ?"; params.push(from); }
   if (to) { sql += " AND ts.date <= ?"; params.push(to); }
   sql += " ORDER BY ts.date ASC";
@@ -171,9 +184,10 @@ app.get("/api/term-spreads/with-btc", (req, res) => {
 
 // GET /api/btc-prices — BTC price history
 app.get("/api/btc-prices", (req, res) => {
-  const { from, to } = req.query;
+  const from = stringQueryParam(req.query.from);
+  const to = stringQueryParam(req.query.to);
   let sql = "SELECT * FROM btc_prices WHERE 1=1";
-  const params: any[] = [];
+  const params: string[] = [];
   if (from) { sql += " AND date >= ?"; params.push(from); }
   if (to) { sql += " AND date <= ?"; params.push(to); }
   sql += " ORDER BY date ASC";
@@ -182,9 +196,10 @@ app.get("/api/btc-prices", (req, res) => {
 
 // GET /api/defillama — DefiLlama sUSDe history
 app.get("/api/defillama", (req, res) => {
-  const { from, to } = req.query;
+  const from = stringQueryParam(req.query.from);
+  const to = stringQueryParam(req.query.to);
   let sql = "SELECT * FROM defillama_apy WHERE 1=1";
-  const params: any[] = [];
+  const params: string[] = [];
   if (from) { sql += " AND date >= ?"; params.push(from); }
   if (to) { sql += " AND date <= ?"; params.push(to); }
   sql += " ORDER BY date ASC";
@@ -229,8 +244,8 @@ app.get("/api/btc-current", async (_req, res) => {
       `${CG_BASE}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true`,
       { headers: CG_HEADERS }
     );
-    const data = await r.json();
-    res.json((data as any).bitcoin);
+    const data = await r.json() as { bitcoin?: { usd: number; usd_24h_change?: number } };
+    res.json(data.bitcoin ?? null);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
@@ -239,11 +254,11 @@ app.get("/api/btc-current", async (_req, res) => {
 // GET /api/stats — database statistics
 app.get("/api/stats", (_req, res) => {
   const stats = {
-    markets: (db.prepare("SELECT COUNT(*) as c FROM markets").get() as any).c,
-    snapshots: (db.prepare("SELECT COUNT(*) as c FROM daily_snapshots").get() as any).c,
-    termSpreads: (db.prepare("SELECT COUNT(*) as c FROM term_spreads").get() as any).c,
-    btcPrices: (db.prepare("SELECT COUNT(*) as c FROM btc_prices").get() as any).c,
-    defiLlama: (db.prepare("SELECT COUNT(*) as c FROM defillama_apy").get() as any).c,
+    markets: (db.prepare("SELECT COUNT(*) as c FROM markets").get() as { c: number }).c,
+    snapshots: (db.prepare("SELECT COUNT(*) as c FROM daily_snapshots").get() as { c: number }).c,
+    termSpreads: (db.prepare("SELECT COUNT(*) as c FROM term_spreads").get() as { c: number }).c,
+    btcPrices: (db.prepare("SELECT COUNT(*) as c FROM btc_prices").get() as { c: number }).c,
+    defiLlama: (db.prepare("SELECT COUNT(*) as c FROM defillama_apy").get() as { c: number }).c,
     dateRange: db.prepare(`
       SELECT MIN(date) as earliest, MAX(date) as latest FROM daily_snapshots
     `).get(),
@@ -256,13 +271,21 @@ app.get("/api/stats", (_req, res) => {
   res.json(stats);
 });
 
-// POST /api/sync — trigger a manual sync
-app.post("/api/sync", async (_req, res) => {
+// POST /api/sync — direct-loopback operator action only. The custom header
+// prevents an arbitrary website from triggering the local service through a
+// visitor's browser; Cloudflare-proxied requests are deliberately hidden.
+let syncing = false;
+app.post("/api/sync", async (req, res) => {
+  if (!isTrustedLocalAdminRequest(req)) return res.sendStatus(404);
+  if (syncing) return res.status(409).json({ error: "sync already in progress" });
+  syncing = true;
   try {
     const stats = await fullSync();
     res.json({ status: "ok", stats });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    syncing = false;
   }
 });
 
@@ -272,8 +295,11 @@ app.post("/api/sync", async (_req, res) => {
 
 const distPath = resolve(import.meta.dirname ?? ".", "../dist");
 if (existsSync(distPath)) {
-  app.use(express.static(distPath));
+  app.use(express.static(distPath, {
+    setHeaders: (res) => res.setHeader("Cache-Control", PUBLIC_CACHE_CONTROL),
+  }));
   app.get("{*path}", (_req, res) => {
+    res.setHeader("Cache-Control", PUBLIC_CACHE_CONTROL);
     res.sendFile(resolve(distPath, "index.html"));
   });
   console.log(`Serving frontend from ${distPath}`);
@@ -283,23 +309,30 @@ if (existsSync(distPath)) {
 // Runs every day at 06:00 UTC (after funding rate settlements)
 
 cron.schedule("0 6 * * *", async () => {
+  if (syncing) return;
+  syncing = true;
   console.log("\n[CRON] Daily sync triggered at", new Date().toISOString());
   try {
     await fullSync();
     console.log("[CRON] Daily sync completed.");
   } catch (err) {
     console.error("[CRON] Daily sync failed:", err);
+  } finally {
+    syncing = false;
   }
-});
+}, { timezone: "UTC" });
 
 // ─── START ──────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+// Bind loopback only. Public access is served by the Cloudflare tunnel,
+// which connects from this same host to localhost:3001. This removes direct
+// LAN exposure; it does not claim to isolate the service from local processes.
+app.listen(PORT, "127.0.0.1", () => {
   console.log(`\nsUSDe API server running on http://localhost:${PORT}`);
   console.log(`Dashboard should connect to this server for data.\n`);
 
   // Check if database has data
-  const count = (db.prepare("SELECT COUNT(*) as c FROM daily_snapshots").get() as any).c;
+  const count = (db.prepare("SELECT COUNT(*) as c FROM daily_snapshots").get() as { c: number }).c;
   if (count === 0) {
     console.log("Database is empty. Running initial sync...\n");
     fullSync().catch((err) => console.error("Initial sync failed:", err));

@@ -258,7 +258,7 @@ export function computeTermSpreads() {
   console.log(`  Found ${multiDates} dates with ≥2 maturities, ${singleDates} with 1 maturity.`);
 
   const computeMany = db.transaction((datesToProcess: { date: string; num_expiries: number }[]) => {
-    for (const { date, num_expiries } of datesToProcess) {
+    for (const { date } of datesToProcess) {
       // Get all snapshots for this date, sorted by expiry (nearest first)
       const snapshots = db.prepare(`
         SELECT market_addr, expiry, implied_apy, underlying_apy, days_to_expiry

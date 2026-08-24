@@ -41,4 +41,6 @@ data/*.db-shm
 
 # Temp/junk files
 nul
+_ul
+*.bak-*-preLoopbackBind
 tmp_spreads.json
