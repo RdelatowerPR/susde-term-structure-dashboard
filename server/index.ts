@@ -308,10 +308,15 @@ if (existsSync(distPath)) {
 // ─── DAILY CRON ─────────────────────────────────────────────────────────────
 // Runs every day at 06:00 UTC (after funding rate settlements)
 
-cron.schedule("0 6 * * *", async () => {
+// node-cron 4 runs a task only when its timer wakes on the exact second. If the
+// machine is busy or asleep at 06:00 the tick lands late, node-cron logs "missed
+// execution" and skips the day - it skipped 2026-10-04, -05 and -06 that way.
+// The missed event runs the sync anyway, and startup catches up a day that was
+// missed while the server was down (see the listen callback below).
+async function runDailySync(reason: string) {
   if (syncing) return;
   syncing = true;
-  console.log("\n[CRON] Daily sync triggered at", new Date().toISOString());
+  console.log(`\n[CRON] Daily sync triggered (${reason}) at`, new Date().toISOString());
   try {
     await fullSync();
     console.log("[CRON] Daily sync completed.");
@@ -320,7 +325,18 @@ cron.schedule("0 6 * * *", async () => {
   } finally {
     syncing = false;
   }
-}, { timezone: "UTC" });
+}
+
+const dailySync = cron.schedule("0 6 * * *", () => runDailySync("06:00 UTC"), { timezone: "UTC" });
+dailySync.on("execution:missed", () => runDailySync("late 06:00 UTC tick"));
+
+// True when no source has synced successfully since the most recent 06:00 UTC.
+function dailySyncIsDue(now = new Date()): boolean {
+  const due = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 6));
+  if (due > now) due.setUTCDate(due.getUTCDate() - 1);
+  const row = db.prepare("SELECT MAX(run_at) AS t FROM sync_log WHERE status = 'ok'").get() as { t: string | null };
+  return !row?.t || new Date(row.t.replace(" ", "T") + "Z") < due;
+}
 
 // ─── START ──────────────────────────────────────────────────────────────────
 
@@ -339,5 +355,6 @@ app.listen(PORT, "127.0.0.1", () => {
   } else {
     console.log(`Database has ${count} snapshots. Ready to serve.`);
     console.log("Daily auto-sync scheduled at 06:00 UTC.\n");
+    if (dailySyncIsDue()) void runDailySync("startup catch-up: no sync since the last 06:00 UTC");
   }
 });
